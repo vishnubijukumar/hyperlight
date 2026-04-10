@@ -37,6 +37,27 @@ alias rg := build-and-move-rust-guests
 alias cg := build-and-move-c-guests
 
 # build host library
+#
+# On Linux s390x, `mshv-bindings` does not compile (MSHV targets x86_64 / aarch64 only). Default
+# `hyperlight-host` features include `mshv3`, so we build the host with KVM + build-metadata only
+# and then `hyperlight-testing` (default workspace members).
+[unix]
+build target=default-target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="{{ if target == "debug" { "dev" } else { target } }}"
+    case "$(uname -m)" in
+        s390x)
+            {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }} \
+                -p hyperlight-host --no-default-features --features kvm,build-metadata
+            {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }} -p hyperlight-testing
+            ;;
+        *)
+            {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }}
+            ;;
+    esac
+
+[windows]
 build target=default-target:
     {{ cargo-cmd }} build --profile={{ if target == "debug" { "dev" } else { target } }} {{ target-triple-flag }}
 
