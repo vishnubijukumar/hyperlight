@@ -46,9 +46,11 @@ hyperlight-guest-tracing = { path = "src/hyperlight_guest_tracing", version = "0
 hyperlight-component-util = { path = "src/hyperlight_component_util", version = "0.14.0", default-features = false }
 hyperlight-component-macro = { path = "src/hyperlight_component_macro", version = "0.14.0", default-features = false }
 
-# Override crates.io kvm-bindings with a local tree (e.g. s390x support). Path is relative to this workspace root.
+# Override crates.io with your kvm workspace fork (e.g. s390x). Cargo resolves both members from the same git tree.
+# Pin with `rev = "…"` instead of `branch` for reproducible builds.
 [patch.crates-io]
-kvm-bindings = { path = "../kvm/kvm-bindings" }
+kvm-bindings = { git = "https://github.com/vishnubijukumar/kvm.git", branch = "s390x-support" }
+kvm-ioctls = { git = "https://github.com/vishnubijukumar/kvm.git", branch = "s390x-support" }
 
 [workspace.lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

@@ -1874,6 +1874,7 @@ dependencies = [
 [[package]]
 name = "kvm-bindings"
 version = "0.14.0"
+source = "git+https://github.com/vishnubijukumar/kvm.git?branch=s390x-support#11334c97c2d26fd71551a84ff5954e66d59aefa0"
 dependencies = [
  "vmm-sys-util",
 ]
