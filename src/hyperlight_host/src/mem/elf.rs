@@ -206,35 +206,42 @@ impl ElfInfo {
                 .copy_from_slice(&self.payload[payload_offset..payload_offset + payload_len]);
             target[start_va + payload_len..start_va + phdr.p_memsz as usize].fill(0);
         }
-        let get_addend = |name, r: &Reloc| {
-            r.r_addend
-                .ok_or_else(|| new_error!("{} missing addend", name))
-        };
-        for r in self.relocs.iter() {
-            #[cfg(target_arch = "aarch64")]
-            match r.r_type {
-                R_AARCH64_RELATIVE => {
-                    let addend = get_addend("R_AARCH64_RELATIVE", r)?;
-                    target[r.r_offset as usize..r.r_offset as usize + 8]
-                        .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
+        #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+        {
+            let get_addend = |name: &str, r: &Reloc| {
+                r.r_addend
+                    .ok_or_else(|| new_error!("{} missing addend", name))
+            };
+            for r in self.relocs.iter() {
+                #[cfg(target_arch = "aarch64")]
+                match r.r_type {
+                    R_AARCH64_RELATIVE => {
+                        let addend = get_addend("R_AARCH64_RELATIVE", r)?;
+                        target[r.r_offset as usize..r.r_offset as usize + 8]
+                            .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
+                    }
+                    R_AARCH64_NONE => {}
+                    _ => {
+                        log_then_return!("unsupported aarch64 relocation {}", r.r_type);
+                    }
                 }
-                R_AARCH64_NONE => {}
-                _ => {
-                    log_then_return!("unsupported aarch64 relocation {}", r.r_type);
+                #[cfg(target_arch = "x86_64")]
+                match r.r_type {
+                    R_X86_64_RELATIVE => {
+                        let addend = get_addend("R_X86_64_RELATIVE", r)?;
+                        target[r.r_offset as usize..r.r_offset as usize + 8]
+                            .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
+                    }
+                    R_X86_64_NONE => {}
+                    _ => {
+                        log_then_return!("unsupported x86_64 relocation {}", r.r_type);
+                    }
                 }
             }
-            #[cfg(target_arch = "x86_64")]
-            match r.r_type {
-                R_X86_64_RELATIVE => {
-                    let addend = get_addend("R_X86_64_RELATIVE", r)?;
-                    target[r.r_offset as usize..r.r_offset as usize + 8]
-                        .copy_from_slice(&(load_addr as i64 + addend).to_le_bytes());
-                }
-                R_X86_64_NONE => {}
-                _ => {
-                    log_then_return!("unsupported x86_64 relocation {}", r.r_type);
-                }
-            }
+        }
+        #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
+        if !self.relocs.is_empty() {
+            log_then_return!("ELF relocations are not implemented for this host architecture");
         }
         cfg_if::cfg_if! {
             if #[cfg(feature = "mem_profile")] {

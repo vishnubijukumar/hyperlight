@@ -1882,8 +1882,7 @@ dependencies = [
 [[package]]
 name = "kvm-ioctls"
 version = "0.24.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "333f77a20344a448f3f70664918135fddeb804e938f28a99d685bd92926e0b19"
+source = "git+https://github.com/vishnubijukumar/kvm.git?branch=s390x-support#11334c97c2d26fd71551a84ff5954e66d59aefa0"
 dependencies = [
  "bitflags 2.11.0",
  "kvm-bindings",

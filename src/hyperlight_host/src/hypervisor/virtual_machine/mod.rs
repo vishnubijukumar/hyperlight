@@ -116,7 +116,13 @@ pub(crate) const XSAVE_MIN_SIZE: usize = 576;
 pub(crate) const XSAVE_BUFFER_SIZE: usize = 4096;
 
 // Compiler error if no hypervisor type is available (not applicable on aarch64 yet)
-#[cfg(not(any(kvm, mshv3, target_os = "windows", target_arch = "aarch64")))]
+#[cfg(not(any(
+    kvm,
+    mshv3,
+    target_os = "windows",
+    target_arch = "aarch64",
+    target_arch = "s390x"
+)))]
 compile_error!(
     "No hypervisor type is available for the current platform. Please enable either the `kvm` or `mshv3` cargo feature."
 );

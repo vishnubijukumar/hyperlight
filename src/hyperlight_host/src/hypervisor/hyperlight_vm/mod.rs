@@ -19,6 +19,8 @@ mod x86_64;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+#[cfg(target_arch = "s390x")]
+mod s390x;
 #[cfg(gdb)]
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -26,6 +28,9 @@ use std::sync::{Arc, Mutex};
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::*;
+
+#[cfg(target_arch = "s390x")]
+pub(crate) use s390x::*;
 use hyperlight_common::log_level::GuestLogFilter;
 use tracing_core::LevelFilter;
 

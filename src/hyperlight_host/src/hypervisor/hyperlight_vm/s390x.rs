@@ -12,9 +12,9 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-*/
+ */
 
-// TODO(aarch64): implement arch-specific HyperlightVm methods
+// TODO(s390x): implement arch-specific HyperlightVm (KVM vCPU, registers, VM exits).
 
 use std::sync::Arc;
 
@@ -50,7 +50,7 @@ impl HyperlightVm {
         #[cfg(crashdump)] _rt_cfg: SandboxRuntimeConfig,
         #[cfg(feature = "mem_profile")] _trace_info: MemTraceInfo,
     ) -> std::result::Result<Self, CreateHyperlightVmError> {
-        unimplemented!("new")
+        unimplemented!("HyperlightVm::new (s390x)")
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -66,7 +66,7 @@ impl HyperlightVm {
             std::sync::Mutex<SandboxMemoryManager<HostSharedMemory>>,
         >,
     ) -> Result<(), InitializeError> {
-        unimplemented!("initialise")
+        unimplemented!("initialise (s390x)")
     }
 
     pub(crate) fn dispatch_call_from_host(
@@ -77,17 +77,17 @@ impl HyperlightVm {
             std::sync::Mutex<SandboxMemoryManager<HostSharedMemory>>,
         >,
     ) -> Result<(), DispatchGuestCallError> {
-        unimplemented!("dispatch_call_from_host")
+        unimplemented!("dispatch_call_from_host (s390x)")
     }
 
     pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
-        unimplemented!("get_root_pt")
+        unimplemented!("get_root_pt (s390x)")
     }
 
     pub(crate) fn get_snapshot_sregs(
         &mut self,
     ) -> Result<CommonSpecialRegisters, AccessPageTableError> {
-        unimplemented!("get_snapshot_sregs")
+        unimplemented!("get_snapshot_sregs (s390x)")
     }
 
     pub(crate) fn reset_vcpu(
@@ -95,6 +95,6 @@ impl HyperlightVm {
         _cr3: u64,
         _sregs: &CommonSpecialRegisters,
     ) -> std::result::Result<(), RegisterError> {
-        unimplemented!("reset_vcpu")
+        unimplemented!("reset_vcpu (s390x)")
     }
 }

@@ -21,11 +21,16 @@ pub(crate) use x86_64::*;
 
 #[cfg(target_arch = "aarch64")]
 mod aarch64;
+#[cfg(target_arch = "s390x")]
+mod s390x;
 #[cfg(target_os = "windows")]
 use std::collections::HashSet;
 
 #[cfg(target_arch = "aarch64")]
 pub(crate) use aarch64::*;
+
+#[cfg(target_arch = "s390x")]
+pub(crate) use s390x::*;
 
 #[cfg(target_os = "windows")]
 #[derive(Debug, PartialEq)]

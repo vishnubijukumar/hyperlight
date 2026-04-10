@@ -12,19 +12,26 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
-*/
+ */
 
-#[cfg(target_arch = "x86_64")]
-mod x86_64;
-#[cfg(target_arch = "x86_64")]
-pub(crate) use x86_64::*;
+// TODO(s390x): map to KVM `kvm_sregs` / PSW / prefix / control registers as needed.
 
-#[cfg(target_arch = "aarch64")]
-mod aarch64;
-#[cfg(target_arch = "aarch64")]
-pub(crate) use aarch64::*;
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub(crate) struct CommonRegisters {
+    _placeholder: u64,
+}
 
-#[cfg(target_arch = "s390x")]
-mod s390x;
-#[cfg(target_arch = "s390x")]
-pub(crate) use s390x::*;
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub(crate) struct CommonSpecialRegisters {
+    _placeholder: u64,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub(crate) struct CommonFpu {
+    _placeholder: u64,
+}
+
+#[derive(Debug, Default, Copy, Clone, PartialEq)]
+pub(crate) struct CommonDebugRegs {
+    _placeholder: u64,
+}
