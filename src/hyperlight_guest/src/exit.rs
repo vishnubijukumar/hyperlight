@@ -21,6 +21,7 @@ use hyperlight_common::outb::OutBAction;
 #[cfg_attr(target_arch = "x86_64", path = "arch/amd64/exit.rs")]
 #[cfg_attr(target_arch = "x86", path = "arch/amd64/exit.rs")]
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/exit.rs")]
+#[cfg_attr(target_arch = "s390x", path = "arch/s390x/exit.rs")]
 mod arch;
 pub(crate) use arch::out32;
 

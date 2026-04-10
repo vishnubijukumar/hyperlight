@@ -24,12 +24,14 @@ limitations under the License.
     path = "arch/i686/layout.rs"
 )]
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/layout.rs")]
+#[cfg_attr(target_arch = "s390x", path = "arch/s390x/layout.rs")]
 mod arch;
 
 pub use arch::{MAX_GPA, MAX_GVA};
 #[cfg(any(
     all(target_arch = "x86_64", not(feature = "nanvix-unstable")),
-    target_arch = "aarch64"
+    target_arch = "aarch64",
+    target_arch = "s390x"
 ))]
 pub use arch::{SNAPSHOT_PT_GVA_MAX, SNAPSHOT_PT_GVA_MIN};
 
