@@ -14,26 +14,38 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-// IBM Z guest runtime (stubs). Next steps: lowcore/prefix, PSW, stack pivot,
-// and a dispatch path that matches the host KVM exit model (not x86 OUT/HLT).
+// s390x guest bring-up: run the same Rust init path as amd64, without the x86
+// asm (GDT/TSS/paging). The host must supply a valid stack pointer (r15) before
+// calling `entrypoint`, or this will fault—real KVM setup will set that.
+//
+// After init / dispatch we spin until the host pre-empts the vCPU. Replace with
+// a proper architected wait (e.g. WAIT / DIAG) once the KVM exit model matches.
+
+/// Placeholder for amd64’s OUT+hlt: keep the vCPU parked until the host runs it again.
+#[inline(never)]
+fn halt_forever() -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 pub mod dispatch {
-    /// Host invokes this for each guest function call. Real s390x code will
-    /// need stack/PSW discipline and a VM-exit back to the host (like amd64’s
-    /// asm wrapper around `internal_dispatch_function`).
+    /// Host invokes this for each guest function call (amd64 wraps this in asm for TLB flush).
     #[unsafe(no_mangle)]
     pub extern "C" fn dispatch_function() {
-        unimplemented!("s390x dispatch_function")
+        crate::guest_function::call::internal_dispatch_function();
+        super::halt_forever();
     }
 }
 
 /// Guest entry — same parameters as amd64 (`PEB`, RNG seed, guest page size, log filter).
 #[unsafe(no_mangle)]
 pub extern "C" fn entrypoint(
-    _peb_address: u64,
-    _seed: u64,
-    _ops: u64,
-    _max_log_level: u64,
+    peb_address: u64,
+    seed: u64,
+    ops: u64,
+    max_log_level: u64,
 ) -> ! {
-    unimplemented!("s390x entrypoint")
+    let _dispatch_addr = crate::generic_init(peb_address, seed, ops, max_log_level);
+    halt_forever();
 }
