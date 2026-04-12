@@ -14,15 +14,29 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-// Hyperlight’s x86 guest uses CPU I/O port OUT instructions; KVM reports those
-// as “I/O exit” with a port number and data. s390x has no PC-style I/O ports:
-// the host must recognize a different *trap* (e.g. DIAG, SVC, or a defined
-// MMIO region) and map it to the same logical `OutBAction` channel.
-//
-// Step 1 (this change): same stub as aarch64 so the crate builds. Step later:
-// implement `out32` + host KVM exit handling as a matched pair.
+// Hyperlight’s x86 guest uses I/O port OUT; s390x uses a `DIAG` with a private
+// function code that Linux KVM does not handle in-kernel, yielding
+// `KVM_EXIT_S390_SIEIC` to userspace (see `hyperlight-host` `kvm/s390x.rs`).
+
+use core::arch::asm;
+
+use hyperlight_common::outb::S390X_HYPERLIGHT_DIAG_IO;
 
 /// Deliver a 32-bit value to the hypervisor on the logical “port” used for guest→host messages.
-pub(crate) unsafe fn out32(_port: u16, _val: u32) {
-    unimplemented!("s390x out32: wire to KVM exit path with host HyperlightVm")
+///
+/// Encoding matches the host decoder: `DIAG R1,R3,I2` with `I2 = S390X_HYPERLIGHT_DIAG_IO`,
+/// port in `GR[R1]`, value in `GR[R3]` (low 32 bits). The guest must run with a PSW that
+/// allows `DIAG` (supervisor state; same default as the rest of the s390x Hyperlight bring-up).
+pub(crate) unsafe fn out32(port: u16, val: u32) {
+    let p = port as u64;
+    let v = val as u64;
+    unsafe {
+        asm!(
+            "diag {p},{v},{fc}",
+            p = in(reg) p,
+            v = in(reg) v,
+            fc = const S390X_HYPERLIGHT_DIAG_IO,
+            options(nostack),
+        );
+    }
 }

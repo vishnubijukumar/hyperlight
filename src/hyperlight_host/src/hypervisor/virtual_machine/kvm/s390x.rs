@@ -17,7 +17,7 @@ limitations under the License.
 use std::sync::LazyLock;
 use std::sync::Mutex;
 
-use hyperlight_common::outb::VmAction;
+use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 use kvm_bindings::{kvm_regs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Error as KvmErrno, Kvm, VcpuExit, VcpuFd, VmFd};
@@ -41,6 +41,40 @@ use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 /// Default PSW mask for a runnable 64-bit guest (DAT on, wait off). The exact
 /// mask is refined when the s390x guest ABI is fully defined.
 const DEFAULT_S390_PSW_MASK: u64 = 0x0000_0001_8000_0000;
+
+/// Instruction interception: guest executed an instruction the kernel did not complete.
+/// Matches Linux `ICPT_INST`.
+const ICPT_INSTRUCTION: u8 = 0x04;
+const S390_INSN_DIAG_OPCODE: u8 = 0x83;
+/// Length of `DIAG` on z/Architecture (no execute prefix).
+const S390_DIAG_INSN_LEN: u64 = 4;
+
+/// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
+/// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
+/// the faulting `DIAG` (see Linux `arch/s390/kvm`).
+fn decode_s390_hyperlight_diag_io(
+    icptcode: u8,
+    ipa: u16,
+    ipb: u32,
+    gprs: &[u64; 16],
+) -> Option<(u16, Vec<u8>)> {
+    if icptcode != ICPT_INSTRUCTION {
+        return None;
+    }
+    if (ipa >> 8) as u8 != S390_INSN_DIAG_OPCODE {
+        return None;
+    }
+    let i2_low = ipb as u16;
+    let i2_high = (ipb >> 16) as u16;
+    if i2_low != S390X_HYPERLIGHT_DIAG_IO && i2_high != S390X_HYPERLIGHT_DIAG_IO {
+        return None;
+    }
+    let r1 = ((ipa >> 4) & 0xF) as usize;
+    let r3 = (ipa & 0xF) as usize;
+    let port = gprs[r1] as u16;
+    let val = gprs[r3] as u32;
+    Some((port, val.to_le_bytes().to_vec()))
+}
 
 /// Return `true` if KVM is available, API version is 12, and `KVM_CAP_USER_MEMORY` is present.
 #[instrument(skip_all, parent = Span::current(), level = "Trace")]
@@ -126,6 +160,8 @@ impl KvmVm {
         enum RunExit {
             Halt,
             IoOut(u16, Vec<u8>),
+            /// `DIAG`-based `out32`: PSW must advance past the instruction before the next `KVM_RUN`.
+            IoOutAdvancePsw(u16, Vec<u8>),
             MmioRead(u64),
             MmioWrite(u64),
             #[cfg(gdb)]
@@ -144,6 +180,24 @@ impl KvmVm {
                     RunExit::IoOut(port, data.to_vec())
                 }
             }
+            Ok(VcpuExit::S390Sieic) => {
+                let run = self.vcpu_fd.get_kvm_run();
+                let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
+                let gprs = unsafe { run.s.regs.gprs };
+                if let Some((port, data)) = decode_s390_hyperlight_diag_io(
+                    sic.icptcode,
+                    sic.ipa,
+                    sic.ipb,
+                    &gprs,
+                ) {
+                    RunExit::IoOutAdvancePsw(port, data)
+                } else {
+                    RunExit::Unknown(format!(
+                        "unhandled s390 SIE intercept: icpt={} ipa={:#x} ipb={:#x}",
+                        sic.icptcode, sic.ipa, sic.ipb
+                    ))
+                }
+            }
             Ok(VcpuExit::MmioRead(addr, _)) => RunExit::MmioRead(addr),
             Ok(VcpuExit::MmioWrite(addr, _)) => RunExit::MmioWrite(addr),
             #[cfg(gdb)]
@@ -156,6 +210,11 @@ impl KvmVm {
         match mapped {
             RunExit::Halt => Ok(VmExit::Halt()),
             RunExit::IoOut(port, data) => Ok(VmExit::IoOut(port, data)),
+            RunExit::IoOutAdvancePsw(port, data) => {
+                let mut g = self.shadow_psw.lock().unwrap();
+                g.0 = g.0.wrapping_add(S390_DIAG_INSN_LEN);
+                Ok(VmExit::IoOut(port, data))
+            }
             RunExit::MmioRead(addr) => Ok(VmExit::MmioRead(addr)),
             RunExit::MmioWrite(addr) => Ok(VmExit::MmioWrite(addr)),
             #[cfg(gdb)]

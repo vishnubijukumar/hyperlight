@@ -123,6 +123,11 @@ pub enum VmAction {
     Halt = 108,
 }
 
+/// `DIAG` immediate used on Linux KVM s390x for Hyperlight guest `out32`.
+/// The in-kernel handler returns `-EOPNOTSUPP`, so userspace receives
+/// `KVM_EXIT_S390_SIEIC` and must decode the same immediate from `kvm_run`.
+pub const S390X_HYPERLIGHT_DIAG_IO: u16 = 0x3E8;
+
 impl TryFrom<u16> for OutBAction {
     type Error = anyhow::Error;
     fn try_from(val: u16) -> anyhow::Result<Self> {
