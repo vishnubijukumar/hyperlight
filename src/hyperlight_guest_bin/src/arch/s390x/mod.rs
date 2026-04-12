@@ -14,14 +14,12 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-// s390x guest bring-up: run the same Rust init path as amd64, without the x86
-// asm (GDT/TSS/paging). The host must supply a valid stack pointer (r15) before
-// calling `entrypoint`, or this will fault—real KVM setup will set that.
-//
-// After init / dispatch we spin until the host pre-empts the vCPU. Replace with
-// a proper architected wait (e.g. WAIT / DIAG) once the KVM exit model matches.
+// s390x guest: dispatch matches amd64’s asm stub shape — TLB hint via PSW condition code,
+// then halt via the same DIAG channel as `hyperlight_guest::arch::s390x::out32`.
 
-/// Placeholder for amd64’s OUT+hlt: keep the vCPU parked until the host runs it again.
+use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
+
+/// Park the vCPU after `generic_init` until the host runs it again (entrypoint path only).
 #[inline(never)]
 fn halt_forever() -> ! {
     loop {
@@ -29,12 +27,41 @@ fn halt_forever() -> ! {
     }
 }
 
+/// After `internal_dispatch_function`, exit to the host like amd64 OUT+hlt.
+#[unsafe(no_mangle)]
+unsafe extern "C" fn s390x_vm_halt_after_dispatch() -> ! {
+    let port = VmAction::Halt as u64;
+    let val = 0u64;
+    unsafe {
+        core::arch::asm!(
+            "diag {p},{v},{fc}",
+            p = in(reg) port,
+            v = in(reg) val,
+            fc = const S390X_HYPERLIGHT_DIAG_IO,
+            options(nostack),
+        );
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+// `brc 8, 1f`: branch if CC == 0 (same sense as amd64 `jnz` over ZF — skip flush when no hint).
+core::arch::global_asm!(
+    ".global dispatch_function",
+    "dispatch_function:",
+    "    brc 8, 1f",
+    "    ptlb",
+    "1:",
+    "    brasl %r14, {internal}",
+    "    brasl %r14, {halt}",
+    internal = sym crate::guest_function::call::internal_dispatch_function,
+    halt = sym s390x_vm_halt_after_dispatch,
+);
+
 pub mod dispatch {
-    /// Host invokes this for each guest function call (amd64 wraps this in asm for TLB flush).
-    #[unsafe(no_mangle)]
-    pub extern "C" fn dispatch_function() {
-        crate::guest_function::call::internal_dispatch_function();
-        super::halt_forever();
+    unsafe extern "C" {
+        pub(crate) unsafe fn dispatch_function();
     }
 }
 

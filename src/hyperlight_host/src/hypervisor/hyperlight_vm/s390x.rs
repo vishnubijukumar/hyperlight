@@ -65,6 +65,18 @@ use crate::sandbox::trace::MemTraceInfo;
 #[cfg(crashdump)]
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 
+/// Condition-code field in the PSW mask (`PSW_MASK_CC` in Linux `arch/s390/include/uapi/asm/ptrace.h`).
+const PSW_MASK_CC: u64 = 0x0000_3000_0000_0000;
+/// Default runnable-guest PSW mask; must stay in sync with `kvm/s390x.rs` `DEFAULT_S390_PSW_MASK`.
+const S390_DEFAULT_PSW_MASK: u64 = 0x0000_0001_8000_0000;
+
+#[inline]
+fn s390_psw_mask_for_dispatch(base_mask: u64, pending_tlb_flush: bool) -> u64 {
+    // x86 uses ZF=1 to request a flush before dispatch; on s390x we use PSW CC=3 (non-zero).
+    let cc: u64 = if pending_tlb_flush { 3 } else { 0 };
+    (base_mask & !PSW_MASK_CC) | (cc << 44)
+}
+
 impl HyperlightVm {
     /// Create a new HyperlightVm instance (will not run vm until calling `initialise`)
     #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
@@ -261,8 +273,13 @@ impl HyperlightVm {
             return Err(DispatchGuestCallError::Uninitialized);
         };
 
-        // Keep default PSW mask (`rflags` 0). x86 uses RFLAGS.ZF for `pending_tlb_flush`; TODO s390x guest contract.
-        let rflags = 0u64;
+        let r_current = self.vm.regs().map_err(DispatchGuestCallError::SetupRegs)?;
+        let base_psw_mask = if r_current.rflags != 0 {
+            r_current.rflags
+        } else {
+            S390_DEFAULT_PSW_MASK
+        };
+        let rflags = s390_psw_mask_for_dispatch(base_psw_mask, self.pending_tlb_flush);
 
         let regs = CommonRegisters {
             rip: dispatch_func_addr,
