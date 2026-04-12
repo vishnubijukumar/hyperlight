@@ -101,7 +101,7 @@ fn main() -> Result<()> {
     cfg_aliases::cfg_aliases! {
         gdb: { all(feature = "gdb", debug_assertions, target_arch = "x86_64") },
         kvm: { all(feature = "kvm", target_os = "linux") },
-        mshv3: { all(feature = "mshv3", target_os = "linux") },
+        mshv3: { all(feature = "mshv3", target_os = "linux", not(target_arch = "s390x")) },
         crashdump: { all(feature = "crashdump", target_arch = "x86_64") },
         // print_debug feature is aliased with debug_assertions to make it only available in debug-builds.
         print_debug: { all(feature = "print_debug", debug_assertions) },

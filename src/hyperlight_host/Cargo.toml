@@ -76,8 +76,11 @@ lazy_static = "1.4.0"
 [target.'cfg(unix)'.dependencies]
 kvm-bindings = { version = "0.14", features = ["fam-wrappers"], optional = true }
 kvm-ioctls = { version = "0.24", optional = true }
+
+# MSHV is only available on Linux x86_64 / aarch64 hosts, not on s390x.
+[target.'cfg(all(unix, not(target_arch = "s390x")))'.dependencies]
 mshv-bindings = { version = "0.6", optional = true }
-mshv-ioctls = { version = "0.6", optional = true}
+mshv-ioctls = { version = "0.6", optional = true }
 
 [dev-dependencies]
 uuid = { version = "1.23.0", features = ["v4"] }

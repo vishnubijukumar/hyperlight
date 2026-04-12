@@ -1,5 +1,5 @@
 /*
-Copyright 2025  The Hyperlight Authors.
+Copyright 2025 The Hyperlight Authors.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -12,21 +12,50 @@ distributed under the License is distributed on an "AS IS" BASIS,
 WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
- */
+*/
 
-// TODO(s390x): implement arch-specific HyperlightVm (KVM vCPU, registers, VM exits).
+//! IBM z/Architecture (s390x) host: Linux KVM only (MSHV is disabled via `build.rs` cfg).
 
-use std::sync::Arc;
+#[cfg(gdb)]
+use std::collections::HashMap;
+#[cfg(any(kvm, mshv3))]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU8;
+#[cfg(any(kvm, mshv3))]
+use std::sync::atomic::AtomicU64;
+use std::sync::{Arc, Mutex};
 
-use super::{
-    AccessPageTableError, CreateHyperlightVmError, DispatchGuestCallError, HyperlightVm,
-    InitializeError,
+use tracing::{Span, instrument};
+use tracing_core::LevelFilter;
+
+use super::*;
+use crate::hypervisor::InterruptHandleImpl;
+#[cfg(any(kvm, mshv3))]
+use crate::hypervisor::LinuxInterruptHandle;
+#[cfg(gdb)]
+use crate::hypervisor::gdb::{
+    DebugCommChannel, DebugMsg, DebugResponse, DebuggableVm, VcpuStopReason,
 };
 #[cfg(gdb)]
-use crate::hypervisor::gdb::{DebugCommChannel, DebugMsg, DebugResponse};
-use crate::hypervisor::regs::CommonSpecialRegisters;
-use crate::hypervisor::virtual_machine::RegisterError;
-use crate::mem::mgr::{SandboxMemoryManager, SnapshotSharedMemory};
+use crate::hypervisor::gdb::{DebugError, DebugMemoryAccessError};
+use crate::hypervisor::regs::{
+    CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
+};
+#[cfg(not(gdb))]
+use crate::hypervisor::virtual_machine::VirtualMachine;
+#[cfg(kvm)]
+use crate::hypervisor::virtual_machine::kvm::KvmVm;
+#[cfg(mshv3)]
+use crate::hypervisor::virtual_machine::mshv::MshvVm;
+#[cfg(target_os = "windows")]
+use crate::hypervisor::virtual_machine::whp::WhpVm;
+use crate::hypervisor::virtual_machine::{
+    HypervisorType, RegisterError, VmError, get_available_hypervisor,
+};
+#[cfg(target_os = "windows")]
+use crate::hypervisor::{PartitionState, WindowsInterruptHandle};
+use crate::mem::mgr::SandboxMemoryManager;
+use crate::mem::ptr::RawPtr;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::host_funcs::FunctionRegistry;
@@ -37,64 +66,258 @@ use crate::sandbox::trace::MemTraceInfo;
 use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 
 impl HyperlightVm {
+    /// Create a new HyperlightVm instance (will not run vm until calling `initialise`)
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
-        _snapshot_mem: SnapshotSharedMemory<GuestSharedMemory>,
-        _scratch_mem: GuestSharedMemory,
-        _pml4_addr: u64,
-        _entrypoint: NextAction,
-        _rsp_gva: u64,
-        _page_size: usize,
-        _config: &SandboxConfiguration,
-        #[cfg(gdb)] _gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
-        #[cfg(crashdump)] _rt_cfg: SandboxRuntimeConfig,
-        #[cfg(feature = "mem_profile")] _trace_info: MemTraceInfo,
+        snapshot_mem: SnapshotSharedMemory<GuestSharedMemory>,
+        scratch_mem: GuestSharedMemory,
+        pml4_addr: u64,
+        entrypoint: NextAction,
+        rsp_gva: u64,
+        page_size: usize,
+        #[cfg_attr(target_os = "windows", allow(unused_variables))] config: &SandboxConfiguration,
+        #[cfg(gdb)] gdb_conn: Option<DebugCommChannel<DebugResponse, DebugMsg>>,
+        #[cfg(crashdump)] rt_cfg: SandboxRuntimeConfig,
+        #[cfg(feature = "mem_profile")] trace_info: MemTraceInfo,
     ) -> std::result::Result<Self, CreateHyperlightVmError> {
-        unimplemented!("HyperlightVm::new (s390x)")
+        #[cfg(gdb)]
+        type VmType = Box<dyn DebuggableVm>;
+        #[cfg(not(gdb))]
+        type VmType = Box<dyn VirtualMachine>;
+
+        let vm: VmType = match get_available_hypervisor() {
+            #[cfg(kvm)]
+            Some(HypervisorType::Kvm) => Box::new(KvmVm::new().map_err(VmError::CreateVm)?),
+            #[cfg(mshv3)]
+            Some(HypervisorType::Mshv) => Box::new(MshvVm::new().map_err(VmError::CreateVm)?),
+            #[cfg(target_os = "windows")]
+            Some(HypervisorType::Whp) => Box::new(WhpVm::new().map_err(VmError::CreateVm)?),
+            None => return Err(CreateHyperlightVmError::NoHypervisorFound),
+        };
+
+        #[cfg(not(feature = "nanvix-unstable"))]
+        vm.set_sregs(&CommonSpecialRegisters::standard_64bit_defaults(pml4_addr))
+            .map_err(VmError::Register)?;
+        #[cfg(feature = "nanvix-unstable")]
+        vm.set_sregs(&CommonSpecialRegisters::standard_real_mode_defaults())
+            .map_err(VmError::Register)?;
+
+        #[cfg(any(kvm, mshv3))]
+        let interrupt_handle: Arc<dyn InterruptHandleImpl> = Arc::new(LinuxInterruptHandle {
+            state: AtomicU8::new(0),
+            #[cfg(all(
+                target_arch = "x86_64",
+                target_vendor = "unknown",
+                target_os = "linux",
+                target_env = "musl"
+            ))]
+            tid: AtomicU64::new(unsafe { libc::pthread_self() as u64 }),
+            #[cfg(not(all(
+                target_arch = "x86_64",
+                target_vendor = "unknown",
+                target_os = "linux",
+                target_env = "musl"
+            )))]
+            tid: AtomicU64::new(unsafe { libc::pthread_self() }),
+            retry_delay: config.get_interrupt_retry_delay(),
+            sig_rt_min_offset: config.get_interrupt_vcpu_sigrtmin_offset(),
+            dropped: AtomicBool::new(false),
+        });
+
+        #[cfg(target_os = "windows")]
+        let interrupt_handle: Arc<dyn InterruptHandleImpl> = Arc::new(WindowsInterruptHandle {
+            state: AtomicU8::new(0),
+            partition_state: std::sync::RwLock::new(PartitionState {
+                handle: vm.partition_handle(),
+                dropped: false,
+            }),
+        });
+
+        let snapshot_slot = 0u32;
+        let scratch_slot = 1u32;
+        #[cfg_attr(not(gdb), allow(unused_mut))]
+        let mut ret = Self {
+            vm,
+            entrypoint,
+            rsp_gva,
+            interrupt_handle,
+            page_size,
+
+            next_slot: scratch_slot + 1,
+            freed_slots: Vec::new(),
+
+            snapshot_slot,
+            snapshot_memory: None,
+            scratch_slot,
+            scratch_memory: None,
+
+            mmap_regions: Vec::new(),
+
+            pending_tlb_flush: false,
+
+            #[cfg(gdb)]
+            gdb_conn,
+            #[cfg(gdb)]
+            sw_breakpoints: HashMap::new(),
+            #[cfg(feature = "mem_profile")]
+            trace_info,
+            #[cfg(crashdump)]
+            rt_cfg,
+        };
+
+        ret.update_snapshot_mapping(snapshot_mem)?;
+        ret.update_scratch_mapping(scratch_mem)?;
+
+        #[cfg(gdb)]
+        if ret.gdb_conn.is_some() {
+            ret.send_dbg_msg(DebugResponse::InterruptHandle(ret.interrupt_handle.clone()))?;
+            ret.vm.set_debug(true).map_err(VmError::Debug)?;
+            if let NextAction::Initialise(initialise) = entrypoint {
+                ret.vm
+                    .add_hw_breakpoint(initialise)
+                    .map_err(CreateHyperlightVmError::AddHwBreakpoint)?;
+            }
+        }
+
+        Ok(ret)
     }
 
+    /// Initialise the internally stored vCPU with the given PEB address and
+    /// random number seed, then run until guest halt (or equivalent exit).
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn initialise(
         &mut self,
-        _peb_addr: crate::mem::ptr::RawPtr,
-        _seed: u64,
-        _page_size: u32,
-        _mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
-        _host_funcs: &Arc<std::sync::Mutex<FunctionRegistry>>,
-        _guest_max_log_level: Option<tracing_core::LevelFilter>,
-        #[cfg(gdb)] _dbg_mem_access_fn: Arc<
-            std::sync::Mutex<SandboxMemoryManager<HostSharedMemory>>,
-        >,
-    ) -> Result<(), InitializeError> {
-        unimplemented!("initialise (s390x)")
-    }
+        peb_addr: RawPtr,
+        seed: u64,
+        page_size: u32,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+        guest_max_log_level: Option<LevelFilter>,
+        #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+    ) -> std::result::Result<(), InitializeError> {
+        let NextAction::Initialise(initialise) = self.entrypoint else {
+            return Ok(());
+        };
 
-    pub(crate) fn dispatch_call_from_host(
-        &mut self,
-        _mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
-        _host_funcs: &Arc<std::sync::Mutex<FunctionRegistry>>,
-        #[cfg(gdb)] _dbg_mem_access_fn: Arc<
-            std::sync::Mutex<SandboxMemoryManager<HostSharedMemory>>,
-        >,
-    ) -> Result<(), DispatchGuestCallError> {
-        unimplemented!("dispatch_call_from_host (s390x)")
+        // Map x86-style argument GPR slots; `rip` is PSW address, `rflags` 0 keeps KVM PSW mask.
+        let regs = CommonRegisters {
+            rip: initialise,
+            rsp: self.rsp_gva - 8,
+            rdi: peb_addr.into(),
+            rsi: seed,
+            rdx: page_size.into(),
+            rcx: super::get_guest_log_filter(guest_max_log_level),
+            rflags: 0,
+            ..Default::default()
+        };
+        self.vm.set_regs(&regs)?;
+
+        self.run(
+            mem_mgr,
+            host_funcs,
+            #[cfg(gdb)]
+            dbg_mem_access_fn,
+        )
+        .map_err(InitializeError::Run)?;
+
+        let regs = self.vm.regs()?;
+        if !regs.rsp.is_multiple_of(16) {
+            return Err(InitializeError::InvalidStackPointer(regs.rsp));
+        }
+        self.rsp_gva = regs.rsp;
+        self.entrypoint = NextAction::Call(regs.rax);
+
+        Ok(())
     }
 
     pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
-        unimplemented!("get_root_pt (s390x)")
+        #[cfg(not(feature = "nanvix-unstable"))]
+        {
+            let sregs = self.vm.sregs()?;
+            Ok(sregs.cr3 & !0xfff_u64)
+        }
+        #[cfg(feature = "nanvix-unstable")]
+        {
+            Ok(0)
+        }
     }
 
     pub(crate) fn get_snapshot_sregs(
         &mut self,
     ) -> Result<CommonSpecialRegisters, AccessPageTableError> {
-        unimplemented!("get_snapshot_sregs (s390x)")
+        Ok(self.vm.sregs()?)
+    }
+
+    #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn dispatch_call_from_host(
+        &mut self,
+        mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
+        host_funcs: &Arc<Mutex<FunctionRegistry>>,
+        #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
+    ) -> std::result::Result<(), DispatchGuestCallError> {
+        let NextAction::Call(dispatch_func_addr) = self.entrypoint else {
+            return Err(DispatchGuestCallError::Uninitialized);
+        };
+
+        // Keep default PSW mask (`rflags` 0). x86 uses RFLAGS.ZF for `pending_tlb_flush`; TODO s390x guest contract.
+        let rflags = 0u64;
+
+        let regs = CommonRegisters {
+            rip: dispatch_func_addr,
+            rsp: self.rsp_gva,
+            rflags,
+            ..Default::default()
+        };
+        self.vm
+            .set_regs(&regs)
+            .map_err(DispatchGuestCallError::SetupRegs)?;
+
+        self.vm
+            .set_fpu(&CommonFpu::default())
+            .map_err(DispatchGuestCallError::SetupRegs)?;
+
+        let result = self
+            .run(
+                mem_mgr,
+                host_funcs,
+                #[cfg(gdb)]
+                dbg_mem_access_fn,
+            )
+            .map_err(DispatchGuestCallError::Run);
+
+        self.pending_tlb_flush = false;
+
+        result
     }
 
     pub(crate) fn reset_vcpu(
         &mut self,
-        _cr3: u64,
-        _sregs: &CommonSpecialRegisters,
+        cr3: u64,
+        sregs: &CommonSpecialRegisters,
     ) -> std::result::Result<(), RegisterError> {
-        unimplemented!("reset_vcpu (s390x)")
+        self.vm.set_regs(&CommonRegisters {
+            rflags: 0,
+            ..Default::default()
+        })?;
+        self.vm.set_debug_regs(&CommonDebugRegs::default())?;
+        self.vm.reset_xsave()?;
+
+        #[cfg(not(feature = "nanvix-unstable"))]
+        {
+            let mut sregs = *sregs;
+            sregs.cr3 = cr3;
+            self.pending_tlb_flush = true;
+            self.vm.set_sregs(&sregs)?;
+        }
+        #[cfg(feature = "nanvix-unstable")]
+        {
+            let _ = (cr3, sregs);
+            self.vm
+                .set_sregs(&CommonSpecialRegisters::standard_real_mode_defaults())?;
+        }
+
+        Ok(())
     }
 }

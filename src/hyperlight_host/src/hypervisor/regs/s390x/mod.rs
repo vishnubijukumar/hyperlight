@@ -76,6 +76,11 @@ impl CommonSpecialRegisters {
     pub(crate) fn standard_64bit_defaults(_pml4_addr: u64) -> Self {
         Self::default()
     }
+
+    #[cfg(feature = "nanvix-unstable")]
+    pub(crate) fn standard_real_mode_defaults() -> Self {
+        Self::default()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
