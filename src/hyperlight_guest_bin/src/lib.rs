@@ -35,6 +35,7 @@ use hyperlight_guest::guest_handle::handle::GuestHandle;
 // === Modules ===
 #[cfg_attr(target_arch = "x86_64", path = "arch/amd64/mod.rs")]
 #[cfg_attr(target_arch = "aarch64", path = "arch/aarch64/mod.rs")]
+#[cfg_attr(target_arch = "s390x", path = "arch/s390x/mod.rs")]
 mod arch;
 // temporarily expose the architecture-specific exception interface;
 // this should be replaced with something a bit more abstract in the
