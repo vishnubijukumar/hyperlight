@@ -1,8 +1,14 @@
 # Hyperlight guests use `entrypoint` from `hyperlight-guest-bin` (not `main` / `_start`).
 # `s390x-unknown-linux-gnu` normally links `Scrt1.o`, which expects `main` and
 # `__libc_start_main`; `-nostartfiles` skips CRT startup so `-eentrypoint` is enough.
+#
+# With `-nodefaultlibs` (from rustc), `memmove` and friends are not linked automatically;
+# `-lc` pulls them from the host libc. (We stub `srand` in this crate instead of musl.)
 [target.s390x-unknown-linux-gnu]
+# Applies to this crate and all path/git dependencies (unlike `[profile]` on the root package).
 rustflags = [
+    "-C", "panic=abort",
     "-C", "link-arg=-nostartfiles",
     "-C", "link-arg=-eentrypoint",
+    "-C", "link-arg=-lc",
 ]

@@ -31,6 +31,12 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 use hyperlight_guest::bail;
 use hyperlight_guest::error::Result;
 
+// `generic_init` in `hyperlight-guest-bin` always calls musl `srand` when the `libc`
+// feature is enabled; with `default-features = false` there is no bundled C library on
+// s390x (`build.rs` only builds musl for x86_64). Stub for minimal smoke guests.
+#[unsafe(no_mangle)]
+pub extern "C" fn srand(_seed: u32) {}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn hyperlight_main() {}
 
