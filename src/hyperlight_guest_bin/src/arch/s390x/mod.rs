@@ -19,17 +19,9 @@ limitations under the License.
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 
-/// Park the vCPU after `generic_init` until the host runs it again (entrypoint path only).
-#[inline(never)]
-fn halt_forever() -> ! {
-    loop {
-        core::hint::spin_loop();
-    }
-}
-
-/// After `internal_dispatch_function`, exit to the host like amd64 OUT+hlt.
+/// Exit to the host with `VmAction::Halt` (amd64 OUT+hlt equivalent): used after init and dispatch.
 #[unsafe(no_mangle)]
-unsafe extern "C" fn s390x_vm_halt_after_dispatch() -> ! {
+unsafe extern "C" fn s390x_guest_vm_halt() -> ! {
     let port = VmAction::Halt as u64;
     let val = 0u64;
     unsafe {
@@ -56,7 +48,7 @@ core::arch::global_asm!(
     "    brasl %r14, {internal}",
     "    brasl %r14, {halt}",
     internal = sym crate::guest_function::call::internal_dispatch_function,
-    halt = sym s390x_vm_halt_after_dispatch,
+    halt = sym s390x_guest_vm_halt,
 );
 
 pub mod dispatch {
@@ -74,5 +66,5 @@ pub extern "C" fn entrypoint(
     max_log_level: u64,
 ) -> ! {
     let _dispatch_addr = crate::generic_init(peb_address, seed, ops, max_log_level);
-    halt_forever();
+    unsafe { s390x_guest_vm_halt() }
 }
