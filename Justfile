@@ -94,6 +94,7 @@ build-s390x-smoke-guest target=default-target:
 build-and-move-s390x-smoke-guest target=default-target: (build-s390x-smoke-guest target) (move-s390x-smoke-guest target)
 
 # s390x only: after `build-and-move-s390x-smoke-guest`, run KVM load + evolve tests (`--ignored`).
+# Requires membership in the `kvm` group (or root): /dev/kvm is typically mode 0660 root:kvm.
 test-s390x-smoke-guest:
     #!/usr/bin/env bash
     set -euo pipefail

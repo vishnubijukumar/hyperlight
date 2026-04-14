@@ -45,11 +45,19 @@ mod s390x_smoke {
     #[serial]
     fn s390x_smoke_guest_new_then_evolve() {
         let path = smoke_elf_path();
-        assert!(
-            is_hypervisor_present(),
-            "KVM is required for evolve(): open /dev/kvm (e.g. add user to the kvm group, or run with sufficient privileges). \
-             If /dev/kvm exists but this still fails, check kernel KVM support and RUST_LOG=info for hypervisor probe logs."
-        );
+        if !is_hypervisor_present() {
+            let dev_kvm = Path::new("/dev/kvm");
+            panic!(
+                "{}",
+                if dev_kvm.exists() {
+                    "KVM probe failed while /dev/kvm exists: this user likely cannot open it (device is usually root:kvm, mode 0660). \
+                     Add the account to the kvm group: `sudo usermod -aG kvm \"$USER\"`, then start a new login session (or run `newgrp kvm`) and confirm `groups` includes kvm. \
+                     If kvm is already listed, run with `RUST_LOG=info` and check KVM_GET_API_VERSION / KVM_CAP_USER_MEMORY logs from the hypervisor probe."
+                } else {
+                    "KVM required: /dev/kvm is missing (KVM not loaded or unavailable in this environment)."
+                }
+            );
+        }
         let u = UninitializedSandbox::new(GuestBinary::FilePath(path), None)
             .expect("UninitializedSandbox::new");
         let _multi = u.evolve().expect("evolve");
