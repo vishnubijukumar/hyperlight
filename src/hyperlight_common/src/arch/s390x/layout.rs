@@ -31,10 +31,17 @@ pub const MAX_GVA: usize = 0xffff_ffff_ffff_efff;
 pub const SNAPSHOT_PT_GVA_MIN: usize = 0xffff_8000_0000_0000;
 pub const SNAPSHOT_PT_GVA_MAX: usize = 0xffff_80ff_ffff_ffff;
 
-// MAX_GPA: conservative guest-physical cap aligned with aarch64 (40-bit span).
-// Real machines and KVM can expose larger guest RAM; tighten or raise this
-// when `hyperlight_guest` / `hyperlight_guest_bin` s390x layouts are defined.
-pub const MAX_GPA: usize = 0x0000_000f_ffff_ffff;
+// MAX_GPA: upper bound used for `scratch_base_gpa` = `MAX_GPA - scratch_size + 1`.
+//
+// Linux s390 KVM rejects `KVM_SET_USER_MEMORY_REGION` when the exclusive end of a
+// slot exceeds `kvm->arch.mem_limit` (`sclp.hamax + 1` when the VM is created).
+// Scratch is mapped at the top of this range, so its end is `MAX_GPA + 1`. The
+// 40-bit-style value shared with aarch64 is often **above** `mem_limit` on
+// smaller LPARs or nested guests, causing `EINVAL` on the scratch slot only.
+//
+// Keep this within a modest span; raise when we can query `mem_limit` or
+// relocate scratch for large guests.
+pub const MAX_GPA: usize = 0x0000_0000_3fff_ffff; // 1 GiB - 1  →  scratch ends at 1 GiB
 
 // Scratch sizing: amd64 counts fixed pages (TSS/IDT, PTE staging, stacks, I/O).
 // s390x guests use different machinery (lowcore, prefix areas, PSW, etc.), but
