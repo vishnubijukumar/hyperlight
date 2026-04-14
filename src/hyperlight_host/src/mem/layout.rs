@@ -587,8 +587,9 @@ impl SandboxMemoryLayout {
             _ => (multiples + 1) * PAGE_SIZE_USIZE,
         };
 
-        #[cfg(target_arch = "s390x")]
-        let size = size.next_multiple_of(1 << 20);
+        // s390x KVM requires 1 MiB-aligned slots, but that rounding is applied in
+        // `ExclusiveSharedMemory::new` / `set_pt_size`, not here — `get_memory_regions_` must
+        // agree with this value.
 
         if size > Self::MAX_MEMORY_SIZE {
             Err(MemoryRequestTooBig(size, Self::MAX_MEMORY_SIZE))
