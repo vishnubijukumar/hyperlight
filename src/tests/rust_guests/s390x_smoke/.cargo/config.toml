@@ -1,0 +1,3 @@
+# Hyperlight guests use `entrypoint` from `hyperlight-guest-bin` (not `main` / `_start`).
+[target.s390x-unknown-linux-gnu]
+rustflags = ["-C", "link-arg=-eentrypoint"]

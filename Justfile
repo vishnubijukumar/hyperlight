@@ -77,6 +77,21 @@ check-guest-libs-s390x target=default-target:
         -p hyperlight-guest -p hyperlight-guest-bin \
         --no-default-features --features macros
 
+# Minimal s390x ELF guest (`s390x-unknown-linux-gnu`, no cargo-hyperlight). Requires a Linux
+# s390x host or a working s390x GNU linker; install `rustup target add s390x-unknown-linux-gnu`.
+build-s390x-smoke-guest target=default-target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="{{ if target == "debug" { "dev" } else { target } }}"
+    cargo build --manifest-path src/tests/rust_guests/s390x_smoke/Cargo.toml \
+        --target s390x-unknown-linux-gnu --bin s390x_smoke --profile="$profile"
+
+@move-s390x-smoke-guest target=default-target:
+    cp {{ root }}/src/tests/rust_guests/s390x_smoke/target/s390x-unknown-linux-gnu/{{ target }}/s390x_smoke \
+        {{ rust_guests_bin_dir }}/{{ target }}/s390x_smoke
+
+build-and-move-s390x-smoke-guest target=default-target: (build-s390x-smoke-guest target) (move-s390x-smoke-guest target)
+
 # build testing guest binaries
 guests: build-and-move-rust-guests build-and-move-c-guests
 
@@ -107,6 +122,7 @@ clean-rust:
     cargo clean
     cd src/tests/rust_guests/simpleguest && cargo clean
     cd src/tests/rust_guests/dummyguest && cargo clean
+    cd src/tests/rust_guests/s390x_smoke && cargo clean
     {{ if os() == "windows" { "cd src/tests/rust_guests/witguest -ErrorAction SilentlyContinue; cargo clean" } else { "[ -d src/tests/rust_guests/witguest ] && cd src/tests/rust_guests/witguest && cargo clean || true" } }}
     {{ if os() == "windows" { "Remove-Item src/tests/rust_guests/witguest/interface.wasm -Force -ErrorAction SilentlyContinue" } else { "rm -f src/tests/rust_guests/witguest/interface.wasm" } }}
     git clean -fdx src/tests/c_guests/bin src/tests/rust_guests/bin

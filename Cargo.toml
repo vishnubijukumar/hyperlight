@@ -23,6 +23,7 @@ members = [
 exclude = [
     "src/tests/rust_guests/dummyguest",
     "src/tests/rust_guests/simpleguest",
+    "src/tests/rust_guests/s390x_smoke",
     "src/tests/rust_guests/witguest",
 ]
 
