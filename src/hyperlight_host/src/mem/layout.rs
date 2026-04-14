@@ -346,6 +346,11 @@ impl SandboxMemoryLayout {
             return Err(MemoryRequestTooSmall(scratch_size, min_scratch_size));
         }
 
+        // Linux KVM on s390x requires scratch memory slots to be a multiple of 1 MiB in size
+        // (see `kvm_arch_prepare_memory_region` in `arch/s390/kvm/kvm-s390.c`).
+        #[cfg(target_arch = "s390x")]
+        let scratch_size = scratch_size.next_multiple_of(1 << 20);
+
         let guest_code_offset = 0;
         // The following offsets are to the fields of the PEB struct itself!
         let peb_offset = code_size.next_multiple_of(PAGE_SIZE_USIZE);
@@ -582,6 +587,9 @@ impl SandboxMemoryLayout {
             _ => (multiples + 1) * PAGE_SIZE_USIZE,
         };
 
+        #[cfg(target_arch = "s390x")]
+        let size = size.next_multiple_of(1 << 20);
+
         if size > Self::MAX_MEMORY_SIZE {
             Err(MemoryRequestTooBig(size, Self::MAX_MEMORY_SIZE))
         } else {
@@ -602,6 +610,10 @@ impl SandboxMemoryLayout {
         }
         let old_pt_size = self.pt_size.unwrap_or(0);
         self.snapshot_size = self.snapshot_size - old_pt_size + size;
+        #[cfg(target_arch = "s390x")]
+        {
+            self.snapshot_size = self.snapshot_size.next_multiple_of(1 << 20);
+        }
         self.pt_size = Some(size);
         Ok(())
     }

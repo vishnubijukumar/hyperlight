@@ -95,8 +95,43 @@ macro_rules! generate_writer {
 pub struct HostMapping {
     ptr: *mut u8,
     size: usize,
+    /// On Linux s390x, guest-visible bytes start at this offset from `ptr` (see
+    /// [`ExclusiveSharedMemory::new`] — KVM requires a 1 MiB–aligned userspace base).
+    #[cfg(all(target_os = "linux", target_arch = "s390x"))]
+    guest_data_offset: usize,
+    /// Length of the guest-accessible span (between guard pages), a multiple of 1 MiB on s390x.
+    #[cfg(all(target_os = "linux", target_arch = "s390x"))]
+    guest_usable_len: usize,
     #[cfg(target_os = "windows")]
     handle: HANDLE,
+}
+
+impl HostMapping {
+    /// Byte offset from `ptr` to the first byte of sandbox memory (after the leading guard page).
+    #[inline]
+    pub(super) fn guest_accessible_offset(&self) -> usize {
+        #[cfg(all(target_os = "linux", target_arch = "s390x"))]
+        {
+            self.guest_data_offset
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "s390x")))]
+        {
+            PAGE_SIZE_USIZE
+        }
+    }
+
+    /// Length of the guest-accessible mapping (not including guard pages).
+    #[inline]
+    pub(super) fn guest_accessible_size(&self) -> usize {
+        #[cfg(all(target_os = "linux", target_arch = "s390x"))]
+        {
+            self.guest_usable_len
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "s390x")))]
+        {
+            self.size - 2 * PAGE_SIZE_USIZE
+        }
+    }
 }
 
 impl Drop for HostMapping {
@@ -329,7 +364,7 @@ impl ExclusiveSharedMemory {
     /// size in bytes. The region will be surrounded by guard pages.
     ///
     /// Return `Err` if shared memory could not be allocated.
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", not(target_arch = "s390x")))]
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
         use libc::{
@@ -421,6 +456,146 @@ impl ExclusiveSharedMemory {
             region: Arc::new(HostMapping {
                 ptr: addr as *mut u8,
                 size: total_size,
+            }),
+        })
+    }
+
+    /// Linux KVM on s390x rejects [`KVM_SET_USER_MEMORY_REGION`] unless both the
+    /// userspace mapping base and the region size are aligned to 1 MiB
+    /// (`kvm_arch_prepare_memory_region` in `arch/s390/kvm/kvm-s390.c`).
+    #[cfg(all(target_os = "linux", target_arch = "s390x"))]
+    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
+    pub fn new(min_size_bytes: usize) -> Result<Self> {
+        use libc::{
+            MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, c_int, mmap, munmap,
+            off_t, size_t,
+        };
+        #[cfg(not(miri))]
+        use libc::{MAP_NORESERVE, PROT_NONE, mprotect};
+
+        if min_size_bytes == 0 {
+            return Err(new_error!("Cannot create shared memory with size 0"));
+        }
+
+        const MIB: usize = 1 << 20;
+        let usable_len = min_size_bytes.next_multiple_of(MIB);
+
+        let map_len = usable_len
+            .checked_add(2 * PAGE_SIZE_USIZE)
+            .and_then(|n| n.checked_add(2 * MIB))
+            .ok_or_else(|| new_error!("Memory required for sandbox exceeded usize::MAX"))?;
+
+        if map_len % PAGE_SIZE_USIZE != 0 {
+            return Err(new_error!(
+                "shared memory must be a multiple of {}",
+                PAGE_SIZE_USIZE
+            ));
+        }
+
+        if map_len > isize::MAX as usize {
+            return Err(HyperlightError::MemoryRequestTooBig(
+                map_len,
+                isize::MAX as usize,
+            ));
+        }
+
+        #[cfg(not(miri))]
+        let flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE;
+        #[cfg(miri)]
+        let flags = MAP_ANONYMOUS | MAP_PRIVATE;
+
+        let addr = unsafe {
+            mmap(
+                null_mut(),
+                map_len as size_t,
+                PROT_READ | PROT_WRITE,
+                flags,
+                -1 as c_int,
+                0 as off_t,
+            )
+        };
+        if addr == MAP_FAILED {
+            log_then_return!(HyperlightError::MmapFailed(
+                Error::last_os_error().raw_os_error()
+            ));
+        }
+
+        let map_base = addr as usize;
+        let data_start = match map_base.checked_add(PAGE_SIZE_USIZE) {
+            Some(s) => s.next_multiple_of(MIB),
+            None => {
+                unsafe {
+                    munmap(addr as *mut c_void, map_len);
+                }
+                return Err(new_error!("s390x shared memory layout arithmetic overflow"));
+            }
+        };
+
+        let data_end = match data_start
+            .checked_add(usable_len)
+            .and_then(|e| e.checked_add(PAGE_SIZE_USIZE))
+        {
+            Some(e) => e,
+            None => {
+                unsafe {
+                    munmap(addr as *mut c_void, map_len);
+                }
+                return Err(new_error!("s390x shared memory layout arithmetic overflow"));
+            }
+        };
+
+        if data_end > map_base.saturating_add(map_len) {
+            unsafe {
+                munmap(addr as *mut c_void, map_len);
+            }
+            return Err(new_error!(
+                "could not fit s390x KVM-aligned mapping in mmap window"
+            ));
+        }
+
+        #[cfg(not(miri))]
+        {
+            let res = unsafe {
+                mprotect(
+                    (data_start - PAGE_SIZE_USIZE) as *mut c_void,
+                    PAGE_SIZE_USIZE,
+                    PROT_NONE,
+                )
+            };
+            if res != 0 {
+                unsafe {
+                    munmap(addr as *mut c_void, map_len);
+                }
+                return Err(HyperlightError::MprotectFailed(
+                    Error::last_os_error().raw_os_error(),
+                ));
+            }
+            let res = unsafe {
+                mprotect(
+                    (data_start + usable_len) as *mut c_void,
+                    PAGE_SIZE_USIZE,
+                    PROT_NONE,
+                )
+            };
+            if res != 0 {
+                unsafe {
+                    munmap(addr as *mut c_void, map_len);
+                }
+                return Err(HyperlightError::MprotectFailed(
+                    Error::last_os_error().raw_os_error(),
+                ));
+            }
+        }
+
+        let guest_data_offset = data_start - map_base;
+
+        Ok(Self {
+            #[allow(clippy::arc_with_non_send_sync)]
+            region: Arc::new(HostMapping {
+                ptr: addr as *mut u8,
+                size: map_len,
+                guest_data_offset,
+                guest_usable_len: usable_len,
             }),
         })
     }
@@ -740,7 +915,7 @@ pub trait SharedMemory {
     /// need to be marked as `unsafe` because doing anything with this
     /// pointer itself requires `unsafe`.
     fn base_addr(&self) -> usize {
-        self.region().ptr as usize + PAGE_SIZE_USIZE
+        self.region().ptr as usize + self.region().guest_accessible_offset()
     }
 
     /// Return the base address of the host mapping of this region as
@@ -748,14 +923,18 @@ pub trait SharedMemory {
     /// not need to be marked as `unsafe` because doing anything with
     /// this pointer itself requires `unsafe`.
     fn base_ptr(&self) -> *mut u8 {
-        self.region().ptr.wrapping_add(PAGE_SIZE_USIZE)
+        unsafe {
+            self.region()
+                .ptr
+                .byte_add(self.region().guest_accessible_offset())
+        }
     }
 
     /// Return the length of usable memory contained in `self`.
     /// The returned size does not include the size of the surrounding
     /// guard pages.
     fn mem_size(&self) -> usize {
-        self.region().size - 2 * PAGE_SIZE_USIZE
+        self.region().guest_accessible_size()
     }
 
     /// Return the raw base address of the host mapping, including the
