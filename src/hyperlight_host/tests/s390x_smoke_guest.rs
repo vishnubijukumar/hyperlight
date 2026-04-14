@@ -18,12 +18,14 @@ limitations under the License.
 //!
 //! Build the ELF first: `just build-and-move-s390x-smoke-guest`, then run:
 //! `cargo test -p hyperlight-host s390x_smoke_guest -- --ignored`
+//!
+//! `evolve()` needs KVM (`/dev/kvm` readable, typically membership in the `kvm` group).
 
 #[cfg(target_arch = "s390x")]
 mod s390x_smoke {
     use std::path::Path;
 
-    use hyperlight_host::{GuestBinary, UninitializedSandbox};
+    use hyperlight_host::{GuestBinary, UninitializedSandbox, is_hypervisor_present};
     use hyperlight_testing::s390x_smoke_guest_as_string;
     use serial_test::serial;
 
@@ -36,20 +38,18 @@ mod s390x_smoke {
         path
     }
 
+    /// ELF parse + snapshot in `new()`, then KVM-backed `evolve()`. Single test avoids relying on
+    /// `cargo test` name order (alphabetical) to run a cheap `new()`-only case before KVM.
     #[test]
     #[ignore = "needs smoke ELF + KVM; run with: cargo test -p hyperlight-host s390x_smoke_guest -- --ignored"]
     #[serial]
-    fn uninitialized_sandbox_new_loads_smoke_guest() {
+    fn s390x_smoke_guest_new_then_evolve() {
         let path = smoke_elf_path();
-        UninitializedSandbox::new(GuestBinary::FilePath(path), None)
-            .expect("UninitializedSandbox::new");
-    }
-
-    #[test]
-    #[ignore = "needs smoke ELF + KVM; run with: cargo test -p hyperlight-host s390x_smoke_guest -- --ignored"]
-    #[serial]
-    fn evolve_smoke_guest_to_multiuse_sandbox() {
-        let path = smoke_elf_path();
+        assert!(
+            is_hypervisor_present(),
+            "KVM is required for evolve(): open /dev/kvm (e.g. add user to the kvm group, or run with sufficient privileges). \
+             If /dev/kvm exists but this still fails, check kernel KVM support and RUST_LOG=info for hypervisor probe logs."
+        );
         let u = UninitializedSandbox::new(GuestBinary::FilePath(path), None)
             .expect("UninitializedSandbox::new");
         let _multi = u.evolve().expect("evolve");
