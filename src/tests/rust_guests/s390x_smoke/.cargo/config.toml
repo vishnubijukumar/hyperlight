@@ -5,7 +5,7 @@
 # With `-nodefaultlibs` (from rustc), `memmove` and friends are not linked automatically;
 # `-lc` pulls them from the host libc. (We stub `srand` in this crate instead of musl.)
 [target.s390x-unknown-linux-gnu]
-# Applies to this crate and all path/git dependencies (unlike `[profile]` on the root package).
+# `panic=abort` for our crates; sysroot `liballoc` still references EH symbols — stubbed in `main.rs`.
 rustflags = [
     "-C", "panic=abort",
     "-C", "link-arg=-nostartfiles",

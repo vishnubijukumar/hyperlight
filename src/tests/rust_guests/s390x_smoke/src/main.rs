@@ -25,6 +25,7 @@ extern crate alloc;
 use hyperlight_guest_bin as _;
 
 use alloc::vec::Vec;
+use core::ffi::c_void;
 
 use hyperlight_common::flatbuffer_wrappers::function_call::FunctionCall;
 use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
@@ -36,6 +37,26 @@ use hyperlight_guest::error::Result;
 // s390x (`build.rs` only builds musl for x86_64). Stub for minimal smoke guests.
 #[unsafe(no_mangle)]
 pub extern "C" fn srand(_seed: u32) {}
+
+// `liballoc` in the rustup sysroot is built with unwinding; DWARF still references the Itanium
+// EH symbols. This guest uses `panic = "abort"` only — these are never invoked at runtime.
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality(
+    _: i32,
+    _: i32,
+    _: u64,
+    _: *mut c_void,
+    _: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn _Unwind_Resume(_exc: *mut c_void) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
 
 #[unsafe(no_mangle)]
 pub extern "C" fn hyperlight_main() {}
