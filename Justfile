@@ -93,6 +93,22 @@ build-s390x-smoke-guest target=default-target:
 
 build-and-move-s390x-smoke-guest target=default-target: (build-s390x-smoke-guest target) (move-s390x-smoke-guest target)
 
+# s390x only: after `build-and-move-s390x-smoke-guest`, run KVM load + evolve tests (`--ignored`).
+test-s390x-smoke-guest:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    case "$(uname -m)" in
+        s390x)
+            cd {{ root }}
+            {{ cargo-cmd }} test -p hyperlight-host --no-default-features --features kvm,build-metadata \
+                --test s390x_smoke_guest -- --ignored --test-threads=1
+            ;;
+        *)
+            echo "just test-s390x-smoke-guest: only supported on Linux s390x" >&2
+            exit 1
+            ;;
+    esac
+
 # build testing guest binaries
 guests: build-and-move-rust-guests build-and-move-c-guests
 
