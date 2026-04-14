@@ -18,12 +18,13 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
-use kvm_bindings::{kvm_regs, kvm_userspace_memory_region};
+use kvm_bindings::{KVM_CAP_S390_IRQCHIP, kvm_enable_cap, kvm_regs, kvm_userspace_memory_region};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Error as KvmErrno, Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
 #[cfg(feature = "trace_guest")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use vmm_sys_util::ioctl::ioctl;
 
 use crate::hypervisor::regs::{
     CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
@@ -48,6 +49,11 @@ const ICPT_INSTRUCTION: u8 = 0x04;
 const S390_INSN_DIAG_OPCODE: u8 = 0x83;
 /// Length of `DIAG` on z/Architecture (no execute prefix).
 const S390_DIAG_INSN_LEN: u64 = 4;
+
+/// `KVMIO` / ioctl numbers from Linux `include/uapi/linux/kvm.h` (same layout as other architectures).
+const KVMIO_IOCTL_TYPE: u32 = 0xAE;
+vmm_sys_util::ioctl_io_nr!(KVM_S390_INITIAL_RESET, KVMIO_IOCTL_TYPE, 0x97);
+vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
@@ -120,9 +126,47 @@ impl KvmVm {
             .create_vm_with_type(0)
             .map_err(|e| CreateVmError::CreateVmFd(e.into()))?;
 
+        // Kernel docs: on s390, `KVM_CAP_S390_IRQCHIP` must be enabled on the VM fd before
+        // `KVM_CREATE_IRQCHIP`. The forked `kvm-ioctls` build does not expose `create_irq_chip`
+        // for `target_arch = "s390x"`, so issue the ioctl here.
+        if vm_fd.check_extension_int(kvm_ioctls::Cap::S390Irqchip) > 0 {
+            let cap = kvm_enable_cap {
+                cap: KVM_CAP_S390_IRQCHIP,
+                ..Default::default()
+            };
+            vm_fd
+                .enable_cap(&cap)
+                .map_err(|e| CreateVmError::InitializeVm(e.into()))?;
+            let irq_rc = unsafe { ioctl(&vm_fd, KVM_CREATE_IRQCHIP_IOCTL()) };
+            if irq_rc < 0 {
+                return Err(CreateVmError::InitializeVm(
+                    KvmErrno::new(
+                        std::io::Error::last_os_error()
+                            .raw_os_error()
+                            .unwrap_or(libc::EIO),
+                    )
+                    .into(),
+                ));
+            }
+        }
+
         let mut vcpu_fd = vm_fd
             .create_vcpu(0)
             .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?;
+
+        // POP initial CPU reset: aligns internal SIE / `kvm_run` register view. Omitting this
+        // has been observed to make the first `KVM_RUN` fail with `-EFAULT` on some hosts.
+        let reset_rc = unsafe { ioctl(&vcpu_fd, KVM_S390_INITIAL_RESET()) };
+        if reset_rc < 0 {
+            return Err(CreateVmError::CreateVcpuFd(
+                KvmErrno::new(
+                    std::io::Error::last_os_error()
+                        .raw_os_error()
+                        .unwrap_or(libc::EIO),
+                )
+                .into(),
+            ));
+        }
 
         let (init_addr, init_mask) = {
             let run = vcpu_fd.get_kvm_run();
@@ -184,12 +228,9 @@ impl KvmVm {
                 let run = self.vcpu_fd.get_kvm_run();
                 let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
                 let gprs = unsafe { run.s.regs.gprs };
-                if let Some((port, data)) = decode_s390_hyperlight_diag_io(
-                    sic.icptcode,
-                    sic.ipa,
-                    sic.ipb,
-                    &gprs,
-                ) {
+                if let Some((port, data)) =
+                    decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
+                {
                     RunExit::IoOutAdvancePsw(port, data)
                 } else {
                     RunExit::Unknown(format!(
