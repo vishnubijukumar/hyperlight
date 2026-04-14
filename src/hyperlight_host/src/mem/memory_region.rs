@@ -149,6 +149,10 @@ pub enum MemoryRegionType {
     /// (Linux) and are read-only + executable. They are cleaned up
     /// during restore/drop — not part of the guest's own allocator.
     MappedFile,
+    /// KVM s390x: backs guest absolute `0 .. 1 MiB` (PSA / lowcore) while the main snapshot
+    /// starts at [`crate::mem::layout::SandboxMemoryLayout::BASE_ADDRESS`].
+    #[cfg(target_arch = "s390x")]
+    S390xLowcore,
 }
 
 #[cfg(target_os = "windows")]

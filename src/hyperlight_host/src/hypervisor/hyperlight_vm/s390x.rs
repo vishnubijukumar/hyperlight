@@ -54,8 +54,10 @@ use crate::hypervisor::virtual_machine::{
 };
 #[cfg(target_os = "windows")]
 use crate::hypervisor::{PartitionState, WindowsInterruptHandle};
+use crate::mem::memory_region::MemoryRegionType;
 use crate::mem::mgr::SandboxMemoryManager;
 use crate::mem::ptr::RawPtr;
+use crate::mem::shared_mem::ExclusiveSharedMemory;
 use crate::mem::shared_mem::{GuestSharedMemory, HostSharedMemory};
 use crate::sandbox::SandboxConfiguration;
 use crate::sandbox::host_funcs::FunctionRegistry;
@@ -164,6 +166,8 @@ impl HyperlightVm {
             scratch_slot,
             scratch_memory: None,
 
+            s390x_lowcore_guest_mem: None,
+
             mmap_regions: Vec::new(),
 
             pending_tlb_flush: false,
@@ -177,6 +181,22 @@ impl HyperlightVm {
             #[cfg(crashdump)]
             rt_cfg,
         };
+
+        // Guest RAM starts at `SandboxMemoryLayout::BASE_ADDRESS` (1 MiB). With KVM initial CPU
+        // reset the prefix is 0, so PSA / lowcore live at guest absolute 0..1MiB. That range
+        // must be backed or the first `KVM_RUN` can fail with `EFAULT` when the kernel touches it.
+        {
+            const MIB: usize = 1 << 20;
+            let low_eshm = ExclusiveSharedMemory::new(MIB).map_err(|e| {
+                CreateHyperlightVmError::SharedMemorySetup(e.to_string())
+            })?;
+            let (_h, low_guest) = low_eshm.build();
+            let low_rgn = low_guest.mapping_at(0, MemoryRegionType::S390xLowcore);
+            unsafe {
+                ret.map_region(&low_rgn)?;
+            }
+            ret.s390x_lowcore_guest_mem = Some(low_guest);
+        }
 
         ret.update_snapshot_mapping(snapshot_mem)?;
         ret.update_scratch_mapping(scratch_mem)?;

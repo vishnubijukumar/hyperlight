@@ -881,6 +881,10 @@ impl GuestSharedMemory {
             MemoryRegionType::Scratch => {
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
             }
+            #[cfg(target_arch = "s390x")]
+            MemoryRegionType::S390xLowcore => {
+                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE
+            }
             #[cfg(unshared_snapshot_mem)]
             MemoryRegionType::Snapshot => {
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE

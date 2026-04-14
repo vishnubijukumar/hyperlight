@@ -1798,6 +1798,8 @@ fn memory_region_types_are_publicly_accessible() {
     let _rt = MemoryRegionType::Scratch;
     let _rt = MemoryRegionType::Snapshot;
     let _rt = MemoryRegionType::MappedFile;
+    #[cfg(target_arch = "s390x")]
+    let _rt = MemoryRegionType::S390xLowcore;
 
     // MemoryRegionFlags is pub and combinable
     let _flags = MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE;

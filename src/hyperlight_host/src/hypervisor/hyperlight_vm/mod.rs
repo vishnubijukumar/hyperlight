@@ -290,6 +290,13 @@ pub enum CreateHyperlightVmError {
     #[cfg(gdb)]
     #[error("Failed to add hardware breakpoint: {0}")]
     AddHwBreakpoint(DebugError),
+    #[cfg(target_arch = "s390x")]
+    #[error("Map region during VM creation: {0}")]
+    MapRegion(#[from] MapRegionError),
+    /// Avoid `#[from] HyperlightError` here: it would cycle with `HyperlightError::HyperlightVmError`.
+    #[cfg(target_arch = "s390x")]
+    #[error("Shared memory setup during VM creation: {0}")]
+    SharedMemorySetup(String),
     #[error("No hypervisor was found")]
     NoHypervisorFound,
     #[cfg(gdb)]
@@ -383,6 +390,10 @@ pub(crate) struct HyperlightVm {
     // The current scratch region, used to keep it alive as long as it
     // is used & when unmapping
     pub(super) scratch_memory: Option<GuestSharedMemory>,
+
+    /// Keeps the GPA 0 lowcore/PSA window alive for KVM on s390x (see `hyperlight_vm/s390x.rs`).
+    #[cfg(target_arch = "s390x")]
+    pub(super) s390x_lowcore_guest_mem: Option<GuestSharedMemory>,
 
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
