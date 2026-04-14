@@ -316,10 +316,15 @@ impl SandboxMemoryLayout {
     const MAX_MEMORY_SIZE: usize = (16 * 1024 * 1024 * 1024) - Self::BASE_ADDRESS; // 16 GiB - BASE_ADDRESS
 
     /// The base address of the sandbox's memory.
-    #[cfg(not(feature = "nanvix-unstable"))]
-    pub(crate) const BASE_ADDRESS: usize = 0x1000;
     #[cfg(feature = "nanvix-unstable")]
     pub(crate) const BASE_ADDRESS: usize = 0x0;
+    /// Linux KVM on s390x installs guest RAM in 1 MiB segment-aligned slots (see
+    /// `kvm_arch_prepare_memory_region` / DAT in `arch/s390/kvm`). A GPA of `0x1000`
+    /// violates that and `KVM_SET_USER_MEMORY_REGION` fails with `EINVAL`.
+    #[cfg(all(not(feature = "nanvix-unstable"), target_arch = "s390x"))]
+    pub(crate) const BASE_ADDRESS: usize = 0x10_0000;
+    #[cfg(all(not(feature = "nanvix-unstable"), not(target_arch = "s390x")))]
+    pub(crate) const BASE_ADDRESS: usize = 0x1000;
 
     // the offset into a sandbox's input/output buffer where the stack starts
     pub(crate) const STACK_POINTER_SIZE_BYTES: u64 = 8;
@@ -587,10 +592,6 @@ impl SandboxMemoryLayout {
             _ => (multiples + 1) * PAGE_SIZE_USIZE,
         };
 
-        // s390x KVM requires 1 MiB-aligned slots, but that rounding is applied in
-        // `ExclusiveSharedMemory::new` / `set_pt_size`, not here — `get_memory_regions_` must
-        // agree with this value.
-
         if size > Self::MAX_MEMORY_SIZE {
             Err(MemoryRequestTooBig(size, Self::MAX_MEMORY_SIZE))
         } else {
@@ -611,10 +612,6 @@ impl SandboxMemoryLayout {
         }
         let old_pt_size = self.pt_size.unwrap_or(0);
         self.snapshot_size = self.snapshot_size - old_pt_size + size;
-        #[cfg(target_arch = "s390x")]
-        {
-            self.snapshot_size = self.snapshot_size.next_multiple_of(1 << 20);
-        }
         self.pt_size = Some(size);
         Ok(())
     }
