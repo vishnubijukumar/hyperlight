@@ -20,8 +20,10 @@ use bitflags::bitflags;
 #[cfg(mshv3)]
 use hyperlight_common::mem::PAGE_SHIFT;
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
+#[cfg(all(kvm, not(target_arch = "s390x")))]
+use kvm_bindings::KVM_MEM_READONLY;
 #[cfg(kvm)]
-use kvm_bindings::{KVM_MEM_READONLY, kvm_userspace_memory_region};
+use kvm_bindings::kvm_userspace_memory_region;
 #[cfg(mshv3)]
 use mshv_bindings::{
     MSHV_SET_MEM_BIT_EXECUTABLE, MSHV_SET_MEM_BIT_UNMAP, MSHV_SET_MEM_BIT_WRITABLE,
@@ -450,22 +452,32 @@ impl From<&MemoryRegion> for mshv_user_mem_region {
 #[cfg(kvm)]
 impl From<&MemoryRegion> for kvm_bindings::kvm_userspace_memory_region {
     fn from(region: &MemoryRegion) -> Self {
-        let perm_flags =
-            MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE;
-
-        let perm_flags = perm_flags.intersection(region.flags);
+        // Linux `check_memory_region_flags` only permits KVM_MEM_READONLY when
+        // `kvm_arch_has_readonly_mem` is true. s390 KVM leaves it false, so a
+        // read-only snapshot slot must use flags=0 or KVM_SET_USER_MEMORY_REGION
+        // fails with EINVAL (guest protection is still the host's responsibility).
+        #[cfg(target_arch = "s390x")]
+        let flags: u32 = 0;
+        #[cfg(not(target_arch = "s390x"))]
+        let flags: u32 = {
+            let perm_flags = (MemoryRegionFlags::READ
+                | MemoryRegionFlags::WRITE
+                | MemoryRegionFlags::EXECUTE)
+                .intersection(region.flags);
+            if perm_flags.contains(MemoryRegionFlags::WRITE) {
+                0 // RWX
+            } else {
+                // Note: KVM_MEM_READONLY is executable
+                KVM_MEM_READONLY // RX
+            }
+        };
 
         kvm_userspace_memory_region {
             slot: 0,
             guest_phys_addr: region.guest_region.start as u64,
             memory_size: (region.guest_region.end - region.guest_region.start) as u64,
             userspace_addr: region.host_region.start as u64,
-            flags: if perm_flags.contains(MemoryRegionFlags::WRITE) {
-                0 // RWX
-            } else {
-                // Note: KVM_MEM_READONLY is executable
-                KVM_MEM_READONLY // RX 
-            },
+            flags,
         }
     }
 }
