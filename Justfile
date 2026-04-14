@@ -79,12 +79,13 @@ check-guest-libs-s390x target=default-target:
 
 # Minimal s390x ELF guest (`s390x-unknown-linux-gnu`, no cargo-hyperlight). Requires a Linux
 # s390x host or a working s390x GNU linker; install `rustup target add s390x-unknown-linux-gnu`.
+# Must `cd` into the crate so Cargo loads `s390x_smoke/.cargo/config.toml` (linker flags).
 build-s390x-smoke-guest target=default-target:
     #!/usr/bin/env bash
     set -euo pipefail
     profile="{{ if target == "debug" { "dev" } else { target } }}"
-    cargo build --manifest-path src/tests/rust_guests/s390x_smoke/Cargo.toml \
-        --target s390x-unknown-linux-gnu --bin s390x_smoke --profile="$profile"
+    cd {{ root }}/src/tests/rust_guests/s390x_smoke \
+        && cargo build --target s390x-unknown-linux-gnu --bin s390x_smoke --profile="$profile"
 
 @move-s390x-smoke-guest target=default-target:
     cp {{ root }}/src/tests/rust_guests/s390x_smoke/target/s390x-unknown-linux-gnu/{{ target }}/s390x_smoke \

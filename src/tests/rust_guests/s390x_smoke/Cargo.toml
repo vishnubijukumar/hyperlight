@@ -1,3 +1,5 @@
+# Build from this directory so `.cargo/config.toml` applies (`cargo build --manifest-path`
+# from the repo root does not walk into this folder for config).
 [package]
 name = "s390x-smoke-guest"
 version = "0.1.0"
