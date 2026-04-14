@@ -21,6 +21,8 @@ use std::sync::Arc;
 use goblin::elf::reloc::{R_AARCH64_NONE, R_AARCH64_RELATIVE};
 #[cfg(target_arch = "x86_64")]
 use goblin::elf::reloc::{R_X86_64_NONE, R_X86_64_RELATIVE};
+#[cfg(target_arch = "s390x")]
+use goblin::elf::sym::Sym;
 use goblin::elf::{Elf, ProgramHeaders, Reloc};
 #[cfg(feature = "nanvix-unstable")]
 use goblin::elf32::program_header::PT_LOAD;
@@ -48,6 +50,9 @@ pub(crate) struct ElfInfo {
     /// The hyperlight version string embedded by `hyperlight-guest-bin`, if
     /// present. Used to detect version/ABI mismatches between guest and host.
     guest_bin_version: Option<String>,
+    /// Dynamic symbols for `R_390_64` (and similar) relocations when loading guests on s390x.
+    #[cfg(target_arch = "s390x")]
+    s390x_dynsyms: Vec<Sym>,
 }
 
 #[cfg(feature = "mem_profile")]
@@ -128,6 +133,9 @@ impl ElfInfo {
         // hyperlight-guest-bin.
         let guest_bin_version = Self::read_version_note(&elf, bytes);
 
+        #[cfg(target_arch = "s390x")]
+        let s390x_dynsyms: Vec<Sym> = elf.dynsyms.iter().collect();
+
         Ok(ElfInfo {
             payload: bytes.to_vec(),
             phdrs: elf.program_headers,
@@ -147,6 +155,8 @@ impl ElfInfo {
             entry: elf.entry,
             relocs,
             guest_bin_version,
+            #[cfg(target_arch = "s390x")]
+            s390x_dynsyms,
         })
     }
 
@@ -241,10 +251,29 @@ impl ElfInfo {
                 // big-endian pointer words in the loaded image.
                 const R_390_NONE: u32 = 0;
                 const R_390_RELATIVE: u32 = 12;
+                /// Direct 64-bit relocation: `S + A` (symbol runtime address + addend).
+                const R_390_64: u32 = 22;
                 match r.r_type {
                     R_390_RELATIVE => {
                         let addend = get_addend("R_390_RELATIVE", r)?;
                         let v = (load_addr as i64 + addend) as u64;
+                        target[r.r_offset as usize..r.r_offset as usize + 8]
+                            .copy_from_slice(&v.to_be_bytes());
+                    }
+                    R_390_64 => {
+                        let addend = get_addend("R_390_64", r)?;
+                        let sym = self
+                            .s390x_dynsyms
+                            .get(r.r_sym)
+                            .ok_or_else(|| new_error!("R_390_64: symbol index {} out of range", r.r_sym))?;
+                        if sym.is_import() {
+                            log_then_return!(
+                                "R_390_64: unresolved dynamic import (symbol index {})",
+                                r.r_sym
+                            );
+                        }
+                        let sym_addr = load_addr as i64 + sym.st_value as i64 - base_va as i64;
+                        let v = (sym_addr + addend) as u64;
                         target[r.r_offset as usize..r.r_offset as usize + 8]
                             .copy_from_slice(&v.to_be_bytes());
                     }
