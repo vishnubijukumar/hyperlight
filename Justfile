@@ -41,6 +41,9 @@ alias cg := build-and-move-c-guests
 # On Linux s390x, `mshv-bindings` does not compile (MSHV targets x86_64 / aarch64 only). Default
 # `hyperlight-host` features include `mshv3`, so we build the host with KVM + build-metadata only
 # and then `hyperlight-testing` (default workspace members).
+#
+# Also type-check guest crates for `s390x-unknown-linux-gnu`: no bundled musl (x86-only in
+# `hyperlight-guest-bin/build.rs`); use `--no-default-features` and enable `macros` only.
 [unix]
 build target=default-target:
     #!/usr/bin/env bash
@@ -51,6 +54,9 @@ build target=default-target:
             {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }} \
                 -p hyperlight-host --no-default-features --features kvm,build-metadata
             {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }} -p hyperlight-testing
+            {{ cargo-cmd }} check --profile="$profile" {{ target-triple-flag }} \
+                -p hyperlight-guest -p hyperlight-guest-bin \
+                --no-default-features --features macros
             ;;
         *)
             {{ cargo-cmd }} build --profile="$profile" {{ target-triple-flag }}
@@ -60,6 +66,16 @@ build target=default-target:
 [windows]
 build target=default-target:
     {{ cargo-cmd }} build --profile={{ if target == "debug" { "dev" } else { target } }} {{ target-triple-flag }}
+
+# Type-check guest libraries for s390x (requires `rustup target add s390x-unknown-linux-gnu`).
+# Run from any host to match what native s390x `just build` does for guests.
+check-guest-libs-s390x target=default-target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="{{ if target == "debug" { "dev" } else { target } }}"
+    cargo check --profile="$profile" --target s390x-unknown-linux-gnu \
+        -p hyperlight-guest -p hyperlight-guest-bin \
+        --no-default-features --features macros
 
 # build testing guest binaries
 guests: build-and-move-rust-guests build-and-move-c-guests
