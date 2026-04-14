@@ -18,4 +18,7 @@ limitations under the License.
 // does not interpret it. Host snapshot code still needs `map` / `virt_to_phys` when
 // built for `target_arch = "s390x"`.
 
-include!("../amd64/vmem.rs");
+#[path = "../amd64/vmem.rs"]
+mod guest_pt_amd64;
+
+pub use guest_pt_amd64::*;
