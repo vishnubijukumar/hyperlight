@@ -24,7 +24,7 @@ use kvm_ioctls::{Error as KvmErrno, Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
 #[cfg(feature = "trace_guest")]
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use vmm_sys_util::ioctl::ioctl;
+use vmm_sys_util::ioctl::{ioctl, ioctl_with_ref};
 
 use crate::hypervisor::regs::{
     CommonDebugRegs, CommonFpu, CommonRegisters, CommonSpecialRegisters,
@@ -54,6 +54,29 @@ const S390_DIAG_INSN_LEN: u64 = 4;
 const KVMIO_IOCTL_TYPE: u32 = 0xAE;
 vmm_sys_util::ioctl_io_nr!(KVM_S390_INITIAL_RESET, KVMIO_IOCTL_TYPE, 0x97);
 vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
+
+/// Matches Linux `struct kvm_s390_interrupt` (`arch/s390/include/uapi/asm/kvm.h`).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct KvmS390Interrupt {
+    irq_type: u32,
+    parm: u32,
+    parm64: u64,
+}
+
+vmm_sys_util::ioctl_iow_nr!(
+    KVM_S390_INTERRUPT_IOCTL,
+    KVMIO_IOCTL_TYPE,
+    0x94,
+    KvmS390Interrupt
+);
+
+/// `KVM_S390_PROGRAM_INT` — inject a program interruption (`parm` = PoP interruption code).
+const KVM_S390_PROGRAM_INT: u32 = 0xfffe_0001;
+/// `PGM_OPERATION` in `arch/s390/include/asm/kvm_host.h` (same as the PoP interruption code).
+const S390_PGM_OPERATION: u32 = 0x0001;
+/// Operation-exception intercept (`ICPT_OPEREXC`). Logged as **44** when formatting the raw `u8`.
+const ICPT_OPEREXC: u8 = 0x2c;
 
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
@@ -197,6 +220,8 @@ impl KvmVm {
             IoOutAdvancePsw(u16, Vec<u8>),
             MmioRead(u64),
             MmioWrite(u64),
+            /// Injected a pending program interrupt; run the vCPU again.
+            Retry,
             #[cfg(gdb)]
             Debug,
             Unknown(String),
@@ -224,7 +249,28 @@ impl KvmVm {
                     let run = vcpu.get_kvm_run();
                     let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
                     let gprs = unsafe { run.s.regs.gprs };
-                    if let Some((port, data)) =
+                    if sic.icptcode == ICPT_OPEREXC {
+                        // KVM can surface operation exceptions as `ICPT_OPEREXC` with `ipa/ipb` zero
+                        // when it defers delivery to userspace. Inject `PGM_OPERATION` like the in-kernel
+                        // path would, then re-enter `KVM_RUN`.
+                        let inti = KvmS390Interrupt {
+                            irq_type: KVM_S390_PROGRAM_INT,
+                            parm: S390_PGM_OPERATION,
+                            parm64: 0,
+                        };
+                        let rc = unsafe { ioctl_with_ref(&*vcpu, KVM_S390_INTERRUPT_IOCTL(), &inti) };
+                        if rc < 0 {
+                            RunExit::Unknown(format!(
+                                "KVM_S390_INTERRUPT (PGM_OPERATION) after ICPT_OPEREXC: errno {}",
+                                std::io::Error::last_os_error()
+                                    .raw_os_error()
+                                    .unwrap_or(libc::EIO)
+                            ))
+                        } else {
+                            tracing::debug!("injected PGM_OPERATION after ICPT_OPEREXC SIE intercept");
+                            RunExit::Retry
+                        }
+                    } else if let Some((port, data)) =
                         decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
                     {
                         RunExit::IoOutAdvancePsw(port, data)
@@ -261,6 +307,7 @@ impl KvmVm {
             }
             RunExit::MmioRead(addr) => Ok(VmExit::MmioRead(addr)),
             RunExit::MmioWrite(addr) => Ok(VmExit::MmioWrite(addr)),
+            RunExit::Retry => Ok(VmExit::Retry()),
             #[cfg(gdb)]
             RunExit::Debug => Ok(VmExit::Debug {}),
             RunExit::Unknown(s) => Ok(VmExit::Unknown(s)),
