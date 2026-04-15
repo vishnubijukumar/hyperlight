@@ -108,9 +108,12 @@ pub(crate) fn is_hypervisor_present() -> bool {
 #[derive(Debug)]
 pub(crate) struct KvmVm {
     vm_fd: VmFd,
-    vcpu_fd: VcpuFd,
-    /// PSW (addr, mask): applied to `kvm_run` before each `KVM_RUN` because
-    /// `VirtualMachine::set_regs` is `&self` and PSW lives in `kvm_run`.
+    /// `VcpuFd::get_kvm_run` requires `&mut`, but `VirtualMachine::set_regs` is `&self`.
+    /// A mutex lets `set_regs` flush the shadow PSW into `kvm_run` immediately so the guest
+    /// never executes with a stale `psw_addr` (e.g. IA 0 after reset), which otherwise surfaces
+    /// as `ICPT_OPEREXC` / `KVM_EXIT_S390_SIEIC` when KVM defers operation exceptions to userspace.
+    vcpu_fd: Mutex<VcpuFd>,
+    /// PSW (addr, mask): mirrored into `kvm_run` on `set_regs` and before each `KVM_RUN`.
     shadow_psw: Mutex<(u64, u64)>,
 }
 
@@ -180,23 +183,9 @@ impl KvmVm {
 
         Ok(Self {
             vm_fd,
-            vcpu_fd,
+            vcpu_fd: Mutex::new(vcpu_fd),
             shadow_psw: Mutex::new((init_addr, init_mask)),
         })
-    }
-
-    fn apply_shadow_psw_to_run(&mut self) {
-        let (addr, mask) = *self.shadow_psw.lock().unwrap();
-        let run = self.vcpu_fd.get_kvm_run();
-        run.psw_addr = addr;
-        run.psw_mask = mask;
-    }
-
-    fn refresh_shadow_psw_from_run(&mut self) {
-        let run = self.vcpu_fd.get_kvm_run();
-        let mut g = self.shadow_psw.lock().unwrap();
-        g.0 = run.psw_addr;
-        g.1 = run.psw_mask;
     }
 
     fn run_vcpu_default(&mut self) -> std::result::Result<VmExit, RunVcpuError> {
@@ -214,39 +203,53 @@ impl KvmVm {
             KernelErr(KvmErrno),
         }
 
-        self.apply_shadow_psw_to_run();
-        let mapped = match self.vcpu_fd.run() {
-            Ok(VcpuExit::Hlt) => RunExit::Halt,
-            Ok(VcpuExit::IoOut(port, data)) => {
-                if port == VmAction::Halt as u16 {
-                    RunExit::Halt
-                } else {
-                    RunExit::IoOut(port, data.to_vec())
-                }
+        let mapped = {
+            let mut vcpu = self.vcpu_fd.lock().unwrap();
+            {
+                let (addr, mask) = *self.shadow_psw.lock().unwrap();
+                let run = vcpu.get_kvm_run();
+                run.psw_addr = addr;
+                run.psw_mask = mask;
             }
-            Ok(VcpuExit::S390Sieic) => {
-                let run = self.vcpu_fd.get_kvm_run();
-                let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
-                let gprs = unsafe { run.s.regs.gprs };
-                if let Some((port, data)) =
-                    decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
-                {
-                    RunExit::IoOutAdvancePsw(port, data)
-                } else {
-                    RunExit::Unknown(format!(
-                        "unhandled s390 SIE intercept: icpt={} ipa={:#x} ipb={:#x}",
-                        sic.icptcode, sic.ipa, sic.ipb
-                    ))
+            let m = match vcpu.run() {
+                Ok(VcpuExit::Hlt) => RunExit::Halt,
+                Ok(VcpuExit::IoOut(port, data)) => {
+                    if port == VmAction::Halt as u16 {
+                        RunExit::Halt
+                    } else {
+                        RunExit::IoOut(port, data.to_vec())
+                    }
                 }
+                Ok(VcpuExit::S390Sieic) => {
+                    let run = vcpu.get_kvm_run();
+                    let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
+                    let gprs = unsafe { run.s.regs.gprs };
+                    if let Some((port, data)) =
+                        decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
+                    {
+                        RunExit::IoOutAdvancePsw(port, data)
+                    } else {
+                        RunExit::Unknown(format!(
+                            "unhandled s390 SIE intercept: icpt={} ipa={:#x} ipb={:#x}",
+                            sic.icptcode, sic.ipa, sic.ipb
+                        ))
+                    }
+                }
+                Ok(VcpuExit::MmioRead(addr, _)) => RunExit::MmioRead(addr),
+                Ok(VcpuExit::MmioWrite(addr, _)) => RunExit::MmioWrite(addr),
+                #[cfg(gdb)]
+                Ok(VcpuExit::Debug(_)) => RunExit::Debug,
+                Ok(other) => RunExit::Unknown(format!("Unknown KVM VCPU exit: {:?}", other)),
+                Err(e) => RunExit::KernelErr(e),
+            };
+            {
+                let run = vcpu.get_kvm_run();
+                let mut g = self.shadow_psw.lock().unwrap();
+                g.0 = run.psw_addr;
+                g.1 = run.psw_mask;
             }
-            Ok(VcpuExit::MmioRead(addr, _)) => RunExit::MmioRead(addr),
-            Ok(VcpuExit::MmioWrite(addr, _)) => RunExit::MmioWrite(addr),
-            #[cfg(gdb)]
-            Ok(VcpuExit::Debug(_)) => RunExit::Debug,
-            Ok(other) => RunExit::Unknown(format!("Unknown KVM VCPU exit: {:?}", other)),
-            Err(e) => RunExit::KernelErr(e),
+            m
         };
-        self.refresh_shadow_psw_from_run();
 
         match mapped {
             RunExit::Halt => Ok(VmExit::Halt()),
@@ -306,6 +309,8 @@ impl VirtualMachine for KvmVm {
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
         let kvm_regs = self
             .vcpu_fd
+            .lock()
+            .unwrap()
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;
         let mut r = CommonRegisters::from(&kvm_regs);
@@ -317,14 +322,21 @@ impl VirtualMachine for KvmVm {
 
     fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError> {
         let kvm_regs: kvm_regs = regs.into();
-        self.vcpu_fd
+        let mut vcpu = self.vcpu_fd.lock().unwrap();
+        vcpu
             .set_regs(&kvm_regs)
             .map_err(|e| RegisterError::SetRegs(e.into()))?;
-        let mut g = self.shadow_psw.lock().unwrap();
-        g.0 = regs.rip;
-        if regs.rflags != 0 {
-            g.1 = regs.rflags;
-        }
+        let (addr, mask) = {
+            let mut g = self.shadow_psw.lock().unwrap();
+            g.0 = regs.rip;
+            if regs.rflags != 0 {
+                g.1 = regs.rflags;
+            }
+            (g.0, g.1)
+        };
+        let run = vcpu.get_kvm_run();
+        run.psw_addr = addr;
+        run.psw_mask = mask;
         Ok(())
     }
 
