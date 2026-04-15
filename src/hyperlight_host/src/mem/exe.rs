@@ -147,8 +147,14 @@ mod tests {
         assert!(fake_version.len() <= note.desc.len());
 
         bytes[desc_offset..desc_offset + fake_version.len()].copy_from_slice(fake_version);
-        bytes[descsz_offset..descsz_offset + 4]
-            .copy_from_slice(&(fake_version.len() as u32).to_le_bytes());
+        // Note header words use the ELF file's endianness (s390x Linux is typically big-endian).
+        let descsz = fake_version.len() as u32;
+        let descsz_bytes = if elf.little_endian {
+            descsz.to_le_bytes()
+        } else {
+            descsz.to_be_bytes()
+        };
+        bytes[descsz_offset..descsz_offset + 4].copy_from_slice(&descsz_bytes);
         bytes
     }
 
@@ -164,20 +170,27 @@ mod tests {
     }
 
     #[test]
-    fn dummyguest_has_no_version_section() {
+    fn dummyguest_reports_guest_bin_version_note() {
         let path = dummy_guest_as_string().expect("failed to locate dummyguest");
         let info = ExeInfo::from_file(&path).expect("failed to load ELF");
 
-        assert!(
-            info.guest_bin_version().is_none(),
-            "dummyguest should not have a version note"
+        let v = info
+            .guest_bin_version()
+            .expect("dummyguest links hyperlight-guest-bin, which embeds a version note");
+        assert_eq!(
+            v,
+            env!("CARGO_PKG_VERSION"),
+            "workspace aligns hyperlight-host and hyperlight-guest-bin versions"
         );
     }
 
-    /// A guest not built with hyperlight-guest-bin has no version note and
-    /// should be accepted (no version check is performed).
+    /// `dummyguest` carries the same guest-bin version note as other Rust guests.
+    #[cfg_attr(
+        all(feature = "kvm", target_arch = "s390x"),
+        ignore = "dummyguest is built for x86_64-hyperlight-none only; s390x CI uses simpleguest"
+    )]
     #[test]
-    fn from_env_accepts_guest_without_version_note() {
+    fn from_env_accepts_dummyguest_matching_version() {
         let path = dummy_guest_as_string().expect("failed to locate dummyguest");
 
         let result = crate::sandbox::snapshot::Snapshot::from_env(
@@ -185,7 +198,7 @@ mod tests {
             crate::sandbox::SandboxConfiguration::default(),
         );
 
-        assert!(result.is_ok(), "should accept guest without version note");
+        assert!(result.is_ok(), "should accept dummyguest when guest-bin version matches: {result:?}");
     }
 
     /// Patch the version section in-memory to simulate a version mismatch.

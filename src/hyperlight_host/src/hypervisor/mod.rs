@@ -470,6 +470,10 @@ pub(crate) mod tests {
     use crate::{Result, is_hypervisor_present, new_error};
 
     #[cfg_attr(feature = "hw-interrupts", ignore)]
+    #[cfg_attr(
+        all(feature = "kvm", target_arch = "s390x"),
+        ignore = "dummyguest is x86-only; use s390x_smoke or a s390x dummyguest when added"
+    )]
     #[test]
     fn test_initialise() -> Result<()> {
         if !is_hypervisor_present() {
