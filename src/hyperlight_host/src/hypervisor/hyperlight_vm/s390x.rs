@@ -187,9 +187,24 @@ impl HyperlightVm {
         // must be backed or the first `KVM_RUN` can fail with `EFAULT` when the kernel touches it.
         {
             const MIB: usize = 1 << 20;
-            let low_eshm = ExclusiveSharedMemory::new(MIB).map_err(|e| {
+            let mut low_eshm = ExclusiveSharedMemory::new(MIB).map_err(|e| {
                 CreateHyperlightVmError::SharedMemorySetup(e.to_string())
             })?;
+            // Linux `struct lowcore` `program_new_psw` @ real 0x1d0. All-zero lets KVM / the CPU
+            // load an invalid PSW on program-interrupt presentation (e.g. after userspace
+            // `KVM_S390_INTERRUPT`), which can recurse into `ICPT_OPEREXC` and spin the host run
+            // loop. Prime a disabled-wait PSW (big-endian doublewords: mask, IA).
+            const LC_PROGRAM_NEW_PSW: usize = 0x1d0;
+            const PSW_MASK_WAIT: u64 = 0x0002_0000_0000_0000;
+            const PSW_MASK_EA: u64 = 0x0000_0001_0000_0000;
+            const PSW_MASK_BA: u64 = 0x0000_0000_8000_0000;
+            let wait_mask: u64 = PSW_MASK_WAIT | PSW_MASK_EA | PSW_MASK_BA;
+            let mut psw_lc: [u8; 16] = [0; 16];
+            psw_lc[0..8].copy_from_slice(&wait_mask.to_be_bytes());
+            psw_lc[8..16].copy_from_slice(&0u64.to_be_bytes());
+            low_eshm
+                .copy_from_slice(&psw_lc, LC_PROGRAM_NEW_PSW)
+                .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(format!("{e:#}")))?;
             let (_h, low_guest) = low_eshm.build();
             let low_rgn = low_guest.mapping_at(0, MemoryRegionType::S390xLowcore);
             unsafe {
