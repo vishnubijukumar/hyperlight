@@ -177,6 +177,10 @@ mod tests {
         assert_eq!(version, env!("CARGO_PKG_VERSION"));
     }
 
+    #[cfg_attr(
+        target_arch = "s390x",
+        ignore = "dummyguest is built for x86_64-hyperlight-none only; s390x CI uses simpleguest"
+    )]
     #[test]
     fn dummyguest_reports_guest_bin_version_note() {
         let path = dummy_guest_as_string().expect("failed to locate dummyguest");
@@ -194,7 +198,7 @@ mod tests {
 
     /// `dummyguest` carries the same guest-bin version note as other Rust guests.
     #[cfg_attr(
-        all(feature = "kvm", target_arch = "s390x"),
+        target_arch = "s390x",
         ignore = "dummyguest is built for x86_64-hyperlight-none only; s390x CI uses simpleguest"
     )]
     #[test]

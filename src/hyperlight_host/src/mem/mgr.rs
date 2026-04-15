@@ -545,13 +545,15 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
         // Initialise the guest input and output data buffers in
         // scratch memory. TODO: remove the need for this.
-        self.scratch_mem.write::<u64>(
+        // Stack cursor uses fixed little-endian u64 (see `hyperlight_guest::guest_handle::io`).
+        let sp = SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES.to_le_bytes();
+        self.scratch_mem.copy_from_slice(
+            &sp,
             self.layout.get_input_data_buffer_scratch_host_offset(),
-            SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
-        self.scratch_mem.write::<u64>(
+        self.scratch_mem.copy_from_slice(
+            &sp,
             self.layout.get_output_data_buffer_scratch_host_offset(),
-            SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES,
         )?;
 
         // Copy the page tables into the scratch region

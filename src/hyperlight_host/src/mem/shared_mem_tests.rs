@@ -22,6 +22,7 @@ use std::mem::size_of;
 
 use hyperlight_common::mem::PAGE_SIZE_USIZE;
 
+use crate::mem::shared_mem::SharedMemory;
 use crate::{Result, log_then_return, new_error};
 
 /// A function that knows how to read data of type `T` from a
@@ -52,20 +53,22 @@ pub(super) fn read_write_test_suite<S, T, U, ShmNew: Fn(usize) -> Result<S>>(
 where
     T: PartialEq + Debug + Clone + TryFrom<U>,
     U: Debug + Clone,
+    S: SharedMemory,
 {
     let mem_size = PAGE_SIZE_USIZE;
-    let test_read = |mem_size, offset| {
-        let sm = shared_memory_new(mem_size)?;
+    let test_read = |mem_size_request, offset| {
+        let sm = shared_memory_new(mem_size_request)?;
         (reader)(&sm, offset)
     };
 
-    let test_write = |mem_size, offset, val| {
-        let mut sm = shared_memory_new(mem_size)?;
+    let test_write = |mem_size_request, offset, val| {
+        let mut sm = shared_memory_new(mem_size_request)?;
         (writer)(&mut sm, offset, val)
     };
 
-    let test_write_read = |mem_size, offset: usize, initial_val: U| {
-        let mut sm = shared_memory_new(mem_size)?;
+    let test_write_read = |mem_size_request, offset: usize, initial_val: U| {
+        let mut sm = shared_memory_new(mem_size_request)?;
+        let actual = sm.mem_size();
         writer(&mut sm, offset, initial_val.clone())?;
         let ret_val = reader(&sm, offset)?;
 
@@ -76,7 +79,7 @@ where
         } else {
             log_then_return!(
                 "(mem_size: {}, offset: {}, val: {:?}), actual returned val = {:?}",
-                mem_size,
+                actual,
                 offset,
                 initial_val,
                 ret_val,
@@ -87,17 +90,35 @@ where
     // write the value to the start of memory, then read it back
     test_write_read(mem_size, 0, initial_val.clone())?;
     // write the value to the end of memory then read it back
-    test_write_read(mem_size, mem_size - size_of::<T>(), initial_val.clone())?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        test_write_read(mem_size, actual - size_of::<T>(), initial_val.clone())?;
+    }
     // write the value to the middle of memory, then read it back
-    test_write_read(mem_size, mem_size / 2, initial_val.clone())?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        test_write_read(mem_size, actual / 2, initial_val.clone())?;
+    }
     // read a value from the memory at an invalid offset.
-    swap_res(test_write_read(mem_size, mem_size * 2, initial_val.clone()))?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        swap_res(test_write_read(mem_size, actual * 2, initial_val.clone()))?;
+    }
     // write the value to the memory at an invalid offset.
-    swap_res(test_write(mem_size, mem_size * 2, initial_val.clone()))?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        swap_res(test_write(mem_size, actual * 2, initial_val.clone()))?;
+    }
     // read a value from the memory beyond the end of the memory.
-    swap_res(test_read(mem_size, mem_size))?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        swap_res(test_read(mem_size, actual))?;
+    }
     // write the value to the memory beyond the end of the memory.
-    swap_res(test_write(mem_size, mem_size, initial_val))?;
+    {
+        let actual = shared_memory_new(mem_size)?.mem_size();
+        swap_res(test_write(mem_size, actual, initial_val))?;
+    }
     Ok(())
 }
 

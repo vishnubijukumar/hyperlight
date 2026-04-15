@@ -106,6 +106,18 @@ pub struct HostMapping {
     handle: HANDLE,
 }
 
+/// Round `min_size_bytes` up to a multiple of 1 MiB without panicking on overflow.
+#[cfg(all(target_os = "linux", target_arch = "s390x"))]
+fn round_guest_usable_len_up_mib(min_size_bytes: usize) -> Option<usize> {
+    const MIB: usize = 1 << 20;
+    let rem = min_size_bytes % MIB;
+    if rem == 0 {
+        Some(min_size_bytes)
+    } else {
+        min_size_bytes.checked_add(MIB - rem)
+    }
+}
+
 impl HostMapping {
     /// Byte offset from `ptr` to the first byte of sandbox memory (after the leading guard page).
     #[inline]
@@ -478,7 +490,9 @@ impl ExclusiveSharedMemory {
         }
 
         const MIB: usize = 1 << 20;
-        let usable_len = min_size_bytes.next_multiple_of(MIB);
+        let usable_len = round_guest_usable_len_up_mib(min_size_bytes).ok_or_else(|| {
+            new_error!("Memory required for sandbox exceeded usize::MAX")
+        })?;
 
         let map_len = usable_len
             .checked_add(2 * PAGE_SIZE_USIZE)
@@ -1112,6 +1126,28 @@ impl HostSharedMemory {
         Ok(())
     }
 
+    /// Read a little-endian `u64` from the sandbox (matches guest IPC buffer layout).
+    #[inline]
+    fn read_u64_le_at(&self, offset: usize) -> Result<u64> {
+        let mut b = [0u8; 8];
+        self.copy_to_slice(&mut b, offset)?;
+        Ok(u64::from_le_bytes(b))
+    }
+
+    /// Write a little-endian `u64` to the sandbox (matches guest IPC buffer layout).
+    #[inline]
+    fn write_u64_le_at(&self, offset: usize, value: u64) -> Result<()> {
+        self.copy_from_slice(&value.to_le_bytes(), offset)
+    }
+
+    /// Read a little-endian `u32` from the sandbox (flatbuffer size prefixes are LE).
+    #[inline]
+    fn read_u32_le_at(&self, offset: usize) -> Result<u32> {
+        let mut b = [0u8; 4];
+        self.copy_to_slice(&mut b, offset)?;
+        Ok(u32::from_le_bytes(b))
+    }
+
     /// Copy the contents of the slice into the sandbox at the
     /// specified offset
     pub fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()> {
@@ -1271,7 +1307,7 @@ impl HostSharedMemory {
         buffer_size: usize,
         data: &[u8],
     ) -> Result<()> {
-        let stack_pointer_rel = self.read::<u64>(buffer_start_offset)? as usize;
+        let stack_pointer_rel = self.read_u64_le_at(buffer_start_offset)? as usize;
         let buffer_size_u64: u64 = buffer_size.try_into()?;
 
         if stack_pointer_rel > buffer_size || stack_pointer_rel < 8 {
@@ -1301,10 +1337,10 @@ impl HostSharedMemory {
 
         // write the offset to the newly written data, to the top of stack.
         // this is used when popping the stack, to know how far back to jump
-        self.write::<u64>(stack_pointer_abs + data.len(), stack_pointer_rel as u64)?;
+        self.write_u64_le_at(stack_pointer_abs + data.len(), stack_pointer_rel as u64)?;
 
         // update stack pointer to point to the next free address
-        self.write::<u64>(
+        self.write_u64_le_at(
             buffer_start_offset,
             (stack_pointer_rel + data.len() + 8) as u64,
         )?;
@@ -1323,7 +1359,7 @@ impl HostSharedMemory {
         T: for<'b> TryFrom<&'b [u8]>,
     {
         // get the stackpointer
-        let stack_pointer_rel = self.read::<u64>(buffer_start_offset)? as usize;
+        let stack_pointer_rel = self.read_u64_le_at(buffer_start_offset)? as usize;
 
         if stack_pointer_rel > buffer_size || stack_pointer_rel < 16 {
             return Err(new_error!(
@@ -1338,7 +1374,7 @@ impl HostSharedMemory {
 
         // go back 8 bytes to get offset to element on top of stack
         let last_element_offset_rel: usize =
-            self.read::<u64>(last_element_offset_abs - 8)? as usize;
+            self.read_u64_le_at(last_element_offset_abs - 8)? as usize;
 
         // Validate element offset (guest-writable): must be in [8, stack_pointer_rel - 16]
         // to leave room for the 8-byte back-pointer plus at least 8 bytes of element data
@@ -1361,7 +1397,7 @@ impl HostSharedMemory {
 
         // Get the size of the flatbuffer buffer from memory
         let fb_buffer_size = {
-            let raw_prefix = self.read::<u32>(last_element_offset_abs)?;
+            let raw_prefix = self.read_u32_le_at(last_element_offset_abs)?;
             // flatbuffer byte arrays are prefixed by 4 bytes indicating
             // the remaining size; add 4 for the prefix itself.
             let total = raw_prefix.checked_add(4).ok_or_else(|| {
@@ -1392,7 +1428,7 @@ impl HostSharedMemory {
         })?;
 
         // update the stack pointer to point to the element we just popped off since that is now free
-        self.write::<u64>(buffer_start_offset, last_element_offset_rel as u64)?;
+        self.write_u64_le_at(buffer_start_offset, last_element_offset_rel as u64)?;
 
         // zero out the memory we just popped off
         let num_bytes_to_zero = stack_pointer_rel - last_element_offset_rel;
@@ -1442,30 +1478,33 @@ mod tests {
         let mem_size: usize = 4096;
         let eshm = ExclusiveSharedMemory::new(mem_size).unwrap();
         let (mut hshm, _) = eshm.build();
+        let actual = hshm.mem_size();
+        let q = actual / 4;
+        let q4 = actual - 3 * q;
 
-        hshm.fill(1, 0, 1024).unwrap();
-        hshm.fill(2, 1024, 1024).unwrap();
-        hshm.fill(3, 2048, 1024).unwrap();
-        hshm.fill(4, 3072, 1024).unwrap();
+        hshm.fill(1, 0, q).unwrap();
+        hshm.fill(2, q, q).unwrap();
+        hshm.fill(3, 2 * q, q).unwrap();
+        hshm.fill(4, 3 * q, q4).unwrap();
 
         let vec = hshm
             .with_exclusivity(|e| e.copy_all_to_vec().unwrap())
             .unwrap();
 
-        assert!(vec[0..1024].iter().all(|&x| x == 1));
-        assert!(vec[1024..2048].iter().all(|&x| x == 2));
-        assert!(vec[2048..3072].iter().all(|&x| x == 3));
-        assert!(vec[3072..4096].iter().all(|&x| x == 4));
+        assert!(vec[0..q].iter().all(|&x| x == 1));
+        assert!(vec[q..2 * q].iter().all(|&x| x == 2));
+        assert!(vec[2 * q..3 * q].iter().all(|&x| x == 3));
+        assert!(vec[3 * q..actual].iter().all(|&x| x == 4));
 
-        hshm.fill(5, 0, 4096).unwrap();
+        hshm.fill(5, 0, actual).unwrap();
 
         let vec2 = hshm
             .with_exclusivity(|e| e.copy_all_to_vec().unwrap())
             .unwrap();
         assert!(vec2.iter().all(|&x| x == 5));
 
-        assert!(hshm.fill(0, 0, mem_size + 1).is_err());
-        assert!(hshm.fill(0, mem_size, 1).is_err());
+        assert!(hshm.fill(0, 0, actual + 1).is_err());
+        assert!(hshm.fill(0, actual, 1).is_err());
     }
 
     /// Verify that `bounds_check!` rejects offset + size combinations that
@@ -1502,6 +1541,7 @@ mod tests {
         let vec_len = 10;
         let eshm = ExclusiveSharedMemory::new(mem_size)?;
         let (hshm, _) = eshm.build();
+        let limit = hshm.mem_size();
         let vec = vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
         // write the value to the memory at the beginning.
         hshm.copy_from_slice(&vec, 0)?;
@@ -1511,7 +1551,7 @@ mod tests {
         hshm.copy_to_slice(vec2.as_mut_slice(), 0)?;
         assert_eq!(vec, vec2);
 
-        let offset = mem_size - vec.len();
+        let offset = limit - vec.len();
         // write the value to the memory at the end.
         hshm.copy_from_slice(&vec, offset)?;
 
@@ -1520,7 +1560,7 @@ mod tests {
         hshm.copy_to_slice(&mut vec3, offset)?;
         assert_eq!(vec, vec3);
 
-        let offset = mem_size / 2;
+        let offset = limit / 2;
         // write the value to the memory at the middle.
         hshm.copy_from_slice(&vec, offset)?;
 
@@ -1531,20 +1571,20 @@ mod tests {
 
         // try and read a value from an offset that is beyond the end of the memory.
         let mut vec5 = vec![0; vec_len];
-        assert!(hshm.copy_to_slice(&mut vec5, mem_size).is_err());
+        assert!(hshm.copy_to_slice(&mut vec5, limit).is_err());
 
         // try and write a value to an offset that is beyond the end of the memory.
-        assert!(hshm.copy_from_slice(&vec5, mem_size).is_err());
+        assert!(hshm.copy_from_slice(&vec5, limit).is_err());
 
         // try and read a value from an offset that is too large.
         let mut vec6 = vec![0; vec_len];
-        assert!(hshm.copy_to_slice(&mut vec6, mem_size * 2).is_err());
+        assert!(hshm.copy_to_slice(&mut vec6, limit * 2).is_err());
 
         // try and write a value to an offset that is too large.
-        assert!(hshm.copy_from_slice(&vec6, mem_size * 2).is_err());
+        assert!(hshm.copy_from_slice(&vec6, limit * 2).is_err());
 
         // try and read a value that is too large.
-        let mut vec7 = vec![0; mem_size * 2];
+        let mut vec7 = vec![0; limit * 2];
         assert!(hshm.copy_to_slice(&mut vec7, 0).is_err());
 
         // try and write a value that is too large.
@@ -1625,9 +1665,10 @@ mod tests {
 
     #[test]
     fn copy_all_to_vec() {
+        let mut eshm = ExclusiveSharedMemory::new(4096).unwrap();
+        let actual = eshm.mem_size();
         let mut data = vec![b'a', b'b', b'c'];
-        data.resize(4096, 0);
-        let mut eshm = ExclusiveSharedMemory::new(data.len()).unwrap();
+        data.resize(actual, 0);
         eshm.copy_from_slice(data.as_slice(), 0).unwrap();
         let ret_vec = eshm.copy_all_to_vec().unwrap();
         assert_eq!(data, ret_vec);
@@ -1925,7 +1966,7 @@ mod tests {
         fn make_buffer(mem_size: usize) -> super::super::HostSharedMemory {
             let eshm = ExclusiveSharedMemory::new(mem_size).unwrap();
             let (hshm, _) = eshm.build();
-            hshm.write::<u64>(0, 8u64).unwrap();
+            hshm.copy_from_slice(&8u64.to_le_bytes(), 0).unwrap();
             hshm
         }
 
@@ -1957,7 +1998,8 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Corrupt size prefix at element start (offset 8) to near u32::MAX.
-            hshm.write::<u32>(8, 0xFFFF_FFFBu32).unwrap(); // +4 = 0xFFFF_FFFF
+            hshm.copy_from_slice(&0xFFFF_FFFBu32.to_le_bytes(), 8)
+                .unwrap(); // +4 = 0xFFFF_FFFF
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -1980,7 +2022,7 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Corrupt back-pointer (offset 16) to 0 (before valid range).
-            hshm.write::<u64>(16, 0u64).unwrap();
+            hshm.copy_from_slice(&0u64.to_le_bytes(), 16).unwrap();
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -2005,7 +2047,7 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Corrupt back-pointer (offset 16) to 9999 (past stack pointer 24).
-            hshm.write::<u64>(16, 9999u64).unwrap();
+            hshm.copy_from_slice(&9999u64.to_le_bytes(), 16).unwrap();
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -2030,7 +2072,7 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Corrupt size prefix: claim 5 bytes (total 9), exceeding the 8-byte slot.
-            hshm.write::<u32>(8, 5u32).unwrap(); // fb_buffer_size = 5 + 4 = 9
+            hshm.copy_from_slice(&5u32.to_le_bytes(), 8).unwrap(); // fb_buffer_size = 5 + 4 = 9
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -2055,7 +2097,7 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // stack_pointer_rel = 24. Set back-pointer to 23 (> 24 - 16 = 8, so rejected).
-            hshm.write::<u64>(16, 23u64).unwrap();
+            hshm.copy_from_slice(&23u64.to_le_bytes(), 16).unwrap();
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -2081,7 +2123,7 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Write 0xFFFF_FFFD as size prefix: checked_add(4) returns None.
-            hshm.write::<u32>(8, 0xFFFF_FFFDu32).unwrap();
+            hshm.copy_from_slice(&0xFFFF_FFFDu32.to_le_bytes(), 8).unwrap();
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());
@@ -2148,6 +2190,10 @@ mod tests {
         // provides a way for running the above tests in a separate process since they expect to crash
         #[test]
         #[cfg_attr(miri, ignore)] // miri can't spawn subprocesses
+        #[cfg_attr(
+            target_arch = "s390x",
+            ignore = "guard pages use a KVM-aligned layout; SIGSEGV shim targets the x86-style mapping"
+        )]
         fn guard_page_testing_shim() {
             let tests = vec!["read", "write", "exec"];
             for test in tests {
