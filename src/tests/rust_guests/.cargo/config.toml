@@ -1,0 +1,13 @@
+# Shared by all crates under `src/tests/rust_guests/` (Cargo walks up to find this file).
+#
+# Native `s390x-unknown-linux-gnu` guest ELFs use `entrypoint` from `hyperlight-guest-bin`, not
+# `main` / glibc startup. Linker flags mirror `s390x_smoke/.cargo/config.toml` (removed in favor
+# of this file).
+
+[target.s390x-unknown-linux-gnu]
+rustflags = [
+    "-C", "panic=abort",
+    "-C", "link-arg=-nostartfiles",
+    "-C", "link-arg=-eentrypoint",
+    "-C", "link-arg=-lc",
+]

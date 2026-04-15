@@ -25,6 +25,36 @@ const MAX_BUFFER_SIZE: usize = 1024;
 
 extern crate alloc;
 
+// `hyperlight-guest-bin` defaults enable `libc` / `generic_init` paths that reference musl on
+// x86_64 only; on Linux s390x we link host `-lc` and stub symbols that would otherwise be
+// unresolved (same pattern as `s390x_smoke`).
+#[cfg(all(target_arch = "s390x", target_os = "linux"))]
+use core::ffi::c_void;
+
+#[cfg(all(target_arch = "s390x", target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn srand(_seed: u32) {}
+
+#[cfg(all(target_arch = "s390x", target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn rust_eh_personality(
+    _: i32,
+    _: i32,
+    _: u64,
+    _: *mut c_void,
+    _: *mut c_void,
+) -> i32 {
+    0
+}
+
+#[cfg(all(target_arch = "s390x", target_os = "linux"))]
+#[unsafe(no_mangle)]
+pub extern "C" fn _Unwind_Resume(_exc: *mut c_void) -> ! {
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 use alloc::boxed::Box;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

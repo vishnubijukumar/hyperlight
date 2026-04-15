@@ -20,6 +20,7 @@ limitations under the License.
 //! `cargo test -p hyperlight-host s390x_smoke_guest -- --ignored`
 //!
 //! `evolve()` needs KVM (`/dev/kvm` readable, typically membership in the `kvm` group).
+//! s390x guest link flags live in `src/tests/rust_guests/.cargo/config.toml`.
 
 #[cfg(target_arch = "s390x")]
 mod s390x_smoke {

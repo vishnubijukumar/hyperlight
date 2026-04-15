@@ -27,6 +27,8 @@ default-target := "debug"
 simpleguest_source := "src/tests/rust_guests/simpleguest/target/x86_64-hyperlight-none"
 dummyguest_source := "src/tests/rust_guests/dummyguest/target/x86_64-hyperlight-none"
 witguest_source := "src/tests/rust_guests/witguest/target/x86_64-hyperlight-none"
+# Native Linux s390x ELF (`cargo build --target s390x-unknown-linux-gnu`); see `rust_guests/.cargo/config.toml`.
+simpleguest_s390x_source := "src/tests/rust_guests/simpleguest/target/s390x-unknown-linux-gnu"
 rust_guests_bin_dir := "src/tests/rust_guests/bin"
 
 ################
@@ -79,7 +81,7 @@ check-guest-libs-s390x target=default-target:
 
 # Minimal s390x ELF guest (`s390x-unknown-linux-gnu`, no cargo-hyperlight). Requires a Linux
 # s390x host or a working s390x GNU linker; install `rustup target add s390x-unknown-linux-gnu`.
-# Must `cd` into the crate so Cargo loads `s390x_smoke/.cargo/config.toml` (linker flags).
+# Linker flags: `src/tests/rust_guests/.cargo/config.toml` (shared with `simpleguest` native builds).
 build-s390x-smoke-guest target=default-target:
     #!/usr/bin/env bash
     set -euo pipefail
@@ -92,6 +94,24 @@ build-s390x-smoke-guest target=default-target:
         {{ rust_guests_bin_dir }}/{{ target }}/s390x_smoke
 
 build-and-move-s390x-smoke-guest target=default-target: (build-s390x-smoke-guest target) (move-s390x-smoke-guest target)
+
+# Native `simpleguest` for s390x (same install layout as `cargo hyperlight` guests: `rust_guests/bin/{profile}/`).
+# Requires `rustup target add s390x-unknown-linux-gnu` and a Linux s390x host (or cross-linker).
+build-simpleguest-s390x target=default-target:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    profile="{{ if target == "debug" { "dev" } else { target } }}"
+    cd {{ root }}/src/tests/rust_guests/simpleguest \
+        && cargo build --target s390x-unknown-linux-gnu --bin simpleguest --profile="$profile"
+
+@move-simpleguest-s390x target=default-target:
+    cp {{ root }}/{{ simpleguest_s390x_source }}/{{ target }}/simpleguest \
+        {{ rust_guests_bin_dir }}/{{ target }}/simpleguest
+
+build-and-move-simpleguest-s390x target=default-target: (build-simpleguest-s390x target) (move-simpleguest-s390x target)
+
+# Build the usual integration-test `simpleguest` binaries for this host (debug + release).
+build-and-move-rust-guests-s390x: (build-and-move-simpleguest-s390x "debug") (build-and-move-simpleguest-s390x "release")
 
 # s390x only: after `build-and-move-s390x-smoke-guest`, run KVM load + evolve tests (`--ignored`).
 # Requires membership in the `kvm` group (or root): /dev/kvm is typically mode 0660 root:kvm.
