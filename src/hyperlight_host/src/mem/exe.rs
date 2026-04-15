@@ -124,32 +124,40 @@ mod tests {
         let path = simple_guest_as_string().expect("failed to locate simpleguest");
         let mut bytes = std::fs::read(path).expect("failed to read simpleguest");
 
-        let elf = goblin::elf::Elf::parse(&bytes).expect("failed to parse ELF");
+        // Parse and locate the note in a block so `bytes` is not borrowed by `Elf` when we patch.
+        let (desc_offset, descsz_offset, little_endian, desc_cap) = {
+            let elf = goblin::elf::Elf::parse(&bytes).expect("failed to parse ELF");
+            let note = elf
+                .iter_note_sections(
+                    &bytes,
+                    Some(hyperlight_common::version_note::HYPERLIGHT_VERSION_SECTION),
+                )
+                .expect("note section should exist")
+                .find_map(|n| n.ok())
+                .expect("should contain a valid note");
 
-        // Use goblin's note iterator to locate the version note.
-        let note = elf
-            .iter_note_sections(
-                &bytes,
-                Some(hyperlight_common::version_note::HYPERLIGHT_VERSION_SECTION),
+            // Compute byte offsets from the slice pointers goblin gives us.
+            let desc_offset = note.desc.as_ptr() as usize - bytes.as_ptr() as usize;
+            // Walk backwards from desc to find descsz: skip padded name and
+            // the descsz + n_type fields (4 bytes each).
+            let name_padded =
+                hyperlight_common::version_note::padded_name_size(note.name.len() + 1);
+            let descsz_offset = desc_offset - name_padded - 8;
+            (
+                desc_offset,
+                descsz_offset,
+                elf.little_endian,
+                note.desc.len(),
             )
-            .expect("note section should exist")
-            .find_map(|n| n.ok())
-            .expect("should contain a valid note");
-
-        // Compute byte offsets from the slice pointers goblin gives us.
-        let desc_offset = note.desc.as_ptr() as usize - bytes.as_ptr() as usize;
-        // Walk backwards from desc to find descsz: skip padded name and
-        // the descsz + n_type fields (4 bytes each).
-        let name_padded = hyperlight_common::version_note::padded_name_size(note.name.len() + 1);
-        let descsz_offset = desc_offset - name_padded - 8;
+        };
 
         let fake_version = b"0.0.0\0";
-        assert!(fake_version.len() <= note.desc.len());
+        assert!(fake_version.len() <= desc_cap);
 
         bytes[desc_offset..desc_offset + fake_version.len()].copy_from_slice(fake_version);
         // Note header words use the ELF file's endianness (s390x Linux is typically big-endian).
         let descsz = fake_version.len() as u32;
-        let descsz_bytes = if elf.little_endian {
+        let descsz_bytes = if little_endian {
             descsz.to_le_bytes()
         } else {
             descsz.to_be_bytes()
@@ -198,7 +206,15 @@ mod tests {
             crate::sandbox::SandboxConfiguration::default(),
         );
 
-        assert!(result.is_ok(), "should accept dummyguest when guest-bin version matches: {result:?}");
+        assert!(
+            result.is_ok(),
+            "should accept dummyguest when guest-bin version matches: {}",
+            result
+                .as_ref()
+                .err()
+                .map(std::string::ToString::to_string)
+                .unwrap_or_default()
+        );
     }
 
     /// Patch the version section in-memory to simulate a version mismatch.
