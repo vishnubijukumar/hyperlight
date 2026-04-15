@@ -17,6 +17,10 @@ limitations under the License.
 // s390x guest: dispatch matches amd64’s asm stub shape — TLB hint via PSW condition code,
 // then halt via the same DIAG channel as `hyperlight_guest::arch::s390x::out32`.
 
+pub(crate) mod context;
+pub(crate) mod exception;
+pub(crate) mod machine;
+
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 
 /// Exit to the host with `VmAction::Halt` (amd64 OUT+hlt equivalent): used after init and dispatch.

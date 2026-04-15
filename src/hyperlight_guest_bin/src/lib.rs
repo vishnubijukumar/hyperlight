@@ -40,7 +40,7 @@ mod arch;
 // temporarily expose the architecture-specific exception interface;
 // this should be replaced with something a bit more abstract in the
 // near future.
-#[cfg(target_arch = "x86_64")]
+#[cfg(any(target_arch = "x86_64", target_arch = "s390x"))]
 pub mod exception;
 pub mod guest_function {
     pub(super) mod call;
@@ -51,7 +51,6 @@ pub mod guest_function {
 pub mod guest_logger;
 pub mod host_comm;
 pub mod memory;
-#[cfg(target_arch = "x86_64")]
 pub mod paging;
 
 // Globals

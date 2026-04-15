@@ -62,6 +62,7 @@ use alloc::{format, vec};
 use core::alloc::Layout;
 use core::ffi::c_char;
 use core::hint::black_box;
+#[cfg(target_arch = "x86_64")]
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
 use hyperlight_common::flatbuffer_wrappers::function_call::{FunctionCall, FunctionCallType};
@@ -75,6 +76,7 @@ use hyperlight_common::log_level::GuestLogFilter;
 use hyperlight_common::vmem::{BasicMapping, MappingKind};
 use hyperlight_guest::error::{HyperlightGuestError, Result};
 use hyperlight_guest::exit::{abort_with_code, abort_with_code_and_message};
+#[cfg(target_arch = "x86_64")]
 use hyperlight_guest_bin::exception::arch::{Context, ExceptionInfo};
 use hyperlight_guest_bin::guest_function::definition::{GuestFunc, GuestFunctionDefinition};
 use hyperlight_guest_bin::guest_function::register::register_function;
@@ -90,10 +92,15 @@ use tracing::{Span, instrument};
 extern crate hyperlight_guest;
 
 static mut BIGARRAY: [i32; 1024 * 1024] = [0; 1024 * 1024];
-// Exception handler test state
+
+#[cfg(target_arch = "x86_64")]
+// Exception handler test state (x86 INT3 / IDT stack layout)
 static HANDLER_INVOCATION_COUNT: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_arch = "x86_64")]
 const TEST_R9_VALUE: u64 = 0x1234567890ABCDEF;
+#[cfg(target_arch = "x86_64")]
 const TEST_R9_MODIFIED_VALUE: u64 = 0xBADC0FFEE;
+#[cfg(target_arch = "x86_64")]
 const TEST_R10_VALUE: u64 = 0xDEADBEEF;
 
 #[guest_function("SetStatic")]
@@ -111,6 +118,7 @@ fn echo_double(value: f64) -> f64 {
     value
 }
 
+#[cfg(target_arch = "x86_64")]
 // Test exception handler that validates stack layout and records invocation
 // It is designed to interact with the trigger_int3 breakpoint exception function below
 fn test_exception_handler(
@@ -160,20 +168,33 @@ fn test_exception_handler(
 }
 
 /// Install handler for a specific vector
+#[cfg(target_arch = "x86_64")]
 #[guest_function("InstallHandler")]
 fn install_handler(vector: i32) {
     hyperlight_guest_bin::exception::arch::HANDLERS[vector as usize]
         .store(test_exception_handler as usize as u64, Ordering::Release);
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("InstallHandler")]
+fn install_handler(_vector: i32) {}
+
 /// Get how many times the handler was invoked
+#[cfg(target_arch = "x86_64")]
 #[guest_function("GetExceptionHandlerCallCount")]
 fn get_exception_handler_call_count() -> i32 {
     let count = HANDLER_INVOCATION_COUNT.load(Ordering::SeqCst);
     count as i32
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("GetExceptionHandlerCallCount")]
+fn get_exception_handler_call_count() -> i32 {
+    0
+}
+
 /// Trigger an INT3 breakpoint exception (vector 3)
+#[cfg(target_arch = "x86_64")]
 #[guest_function("TriggerInt3")]
 fn trigger_int3() -> i32 {
     // Set up test value in R9 before triggering exception
@@ -211,6 +232,12 @@ fn trigger_int3() -> i32 {
         );
     }
     0
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("TriggerInt3")]
+fn trigger_int3() -> i32 {
+    -1
 }
 
 #[guest_function("EchoFloat")]
@@ -375,8 +402,12 @@ fn fill_heap_and_cause_exception() {
         ptr = unsafe { alloc::alloc::alloc_zeroed(layout) };
     }
 
-    // trigger an undefined instruction exception
-    unsafe { core::arch::asm!("ud2") };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("ud2");
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    hyperlight_guest::exit::abort();
 }
 
 #[guest_function("ExhaustHeap")]
@@ -511,14 +542,19 @@ fn log_message(message: String, level: i32) {
 
 #[guest_function("TriggerException")]
 fn trigger_exception() {
-    // trigger an undefined instruction exception
-    unsafe { core::arch::asm!("ud2") };
+    #[cfg(target_arch = "x86_64")]
+    unsafe {
+        core::arch::asm!("ud2");
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    hyperlight_guest::exit::abort();
 }
 
 /// Execute an OUT instruction with an arbitrary port and value.
 /// This is used to test that invalid OUT ports cause errors.
 #[guest_function("OutbWithPort")]
 fn outb_with_port(port: u32, value: u32) {
+    #[cfg(target_arch = "x86_64")]
     unsafe {
         core::arch::asm!(
             "out dx, eax",
@@ -527,6 +563,26 @@ fn outb_with_port(port: u32, value: u32) {
             options(preserves_flags, nomem, nostack)
         );
     }
+    #[cfg(all(target_arch = "s390x", target_os = "linux"))]
+    unsafe {
+        use hyperlight_common::outb::S390X_HYPERLIGHT_DIAG_IO;
+        let p = port as u64;
+        let v = value as u64;
+        core::arch::asm!(
+            "diag {p},{v},{fc}",
+            p = in(reg) p,
+            v = in(reg) v,
+            fc = const S390X_HYPERLIGHT_DIAG_IO,
+            options(nostack),
+        );
+    }
+    #[cfg(not(any(
+        target_arch = "x86_64",
+        all(target_arch = "s390x", target_os = "linux")
+    )))]
+    {
+        let _ = (port, value);
+    }
 }
 
 // =============================================================================
@@ -534,8 +590,10 @@ fn outb_with_port(port: u32, value: u32) {
 // =============================================================================
 
 /// Counter incremented by the timer interrupt handler.
+#[cfg(target_arch = "x86_64")]
 static TIMER_IRQ_COUNT: AtomicU32 = AtomicU32::new(0);
 
+#[cfg(target_arch = "x86_64")]
 // Timer IRQ handler (vector 0x20 = IRQ0 after PIC remapping).
 // Increments the global counter, sends PIC EOI, and returns from interrupt.
 //
@@ -555,11 +613,13 @@ core::arch::global_asm!(
     counter = sym TIMER_IRQ_COUNT,
 );
 
+#[cfg(target_arch = "x86_64")]
 unsafe extern "C" {
     fn _timer_irq_handler();
 }
 
 /// IDT pointer structure for SIDT/LIDT instructions.
+#[cfg(target_arch = "x86_64")]
 #[repr(C, packed)]
 struct IdtPtr {
     limit: u16,
@@ -581,6 +641,7 @@ struct IdtPtr {
 /// - `max_spin`:  maximum busy-wait iterations before giving up
 ///
 /// Returns the number of timer interrupts received.
+#[cfg(target_arch = "x86_64")]
 #[guest_function("TestTimerInterrupts")]
 fn test_timer_interrupts(period_us: i32, max_spin: i32) -> i32 {
     // Reset counter
@@ -694,6 +755,12 @@ fn test_timer_interrupts(period_us: i32, max_spin: i32) -> i32 {
     TIMER_IRQ_COUNT.load(Ordering::SeqCst) as i32
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("TestTimerInterrupts")]
+fn test_timer_interrupts(_period_us: i32, _max_spin: i32) -> i32 {
+    -1
+}
+
 static mut COUNTER: i32 = 0;
 
 #[guest_function("AddToStatic")]
@@ -729,22 +796,39 @@ fn call_given_paramless_hostfunc_that_returns_i64(hostfuncname: String) -> Resul
     call_host_function::<i64>(&hostfuncname, None, ReturnType::Long)
 }
 
+#[cfg(target_arch = "x86_64")]
 #[guest_function("UseSSE2Registers")]
 fn use_sse2_registers() {
     let val: f32 = 1.2f32;
     unsafe { core::arch::asm!("movss xmm1, DWORD PTR [{0}]", in(reg) &val) };
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("UseSSE2Registers")]
+fn use_sse2_registers() {}
+
+#[cfg(target_arch = "x86_64")]
 #[guest_function("SetDr0")]
 fn set_dr0(value: u64) {
     unsafe { core::arch::asm!("mov dr0, {}", in(reg) value) };
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("SetDr0")]
+fn set_dr0(_value: u64) {}
+
+#[cfg(target_arch = "x86_64")]
 #[guest_function("GetDr0")]
 fn get_dr0() -> u64 {
     let value: u64;
     unsafe { core::arch::asm!("mov {}, dr0", out(reg) value) };
     value
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+#[guest_function("GetDr0")]
+fn get_dr0() -> u64 {
+    0
 }
 
 #[guest_function("Add")]
@@ -1018,6 +1102,7 @@ fn corrupt_output_size_prefix() -> i32 {
         buf[12..16].copy_from_slice(&[0u8; 4]);
         buf[16..24].copy_from_slice(&8_u64.to_le_bytes());
 
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!(
             "out dx, eax",
             "cli",
@@ -1026,6 +1111,27 @@ fn corrupt_output_size_prefix() -> i32 {
             in("eax") 0u32,
             options(noreturn),
         );
+        #[cfg(all(target_arch = "s390x", target_os = "linux"))]
+        {
+            use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
+            let port = VmAction::Halt as u64;
+            let val = 0u64;
+            core::arch::asm!(
+                "diag {p},{v},{fc}",
+                p = in(reg) port,
+                v = in(reg) val,
+                fc = const S390X_HYPERLIGHT_DIAG_IO,
+                options(nostack),
+            );
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            all(target_arch = "s390x", target_os = "linux")
+        )))]
+        hyperlight_guest::exit::abort();
     }
 }
 
@@ -1041,6 +1147,7 @@ fn corrupt_output_back_pointer() -> i32 {
         buf[8..16].copy_from_slice(&[0u8; 8]);
         buf[16..24].copy_from_slice(&0xDEAD_u64.to_le_bytes());
 
+        #[cfg(target_arch = "x86_64")]
         core::arch::asm!(
             "out dx, eax",
             "cli",
@@ -1049,6 +1156,27 @@ fn corrupt_output_back_pointer() -> i32 {
             in("eax") 0u32,
             options(noreturn),
         );
+        #[cfg(all(target_arch = "s390x", target_os = "linux"))]
+        {
+            use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
+            let port = VmAction::Halt as u64;
+            let val = 0u64;
+            core::arch::asm!(
+                "diag {p},{v},{fc}",
+                p = in(reg) port,
+                v = in(reg) val,
+                fc = const S390X_HYPERLIGHT_DIAG_IO,
+                options(nostack),
+            );
+            loop {
+                core::hint::spin_loop();
+            }
+        }
+        #[cfg(not(any(
+            target_arch = "x86_64",
+            all(target_arch = "s390x", target_os = "linux")
+        )))]
+        hyperlight_guest::exit::abort();
     }
 }
 
