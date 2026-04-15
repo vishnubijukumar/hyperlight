@@ -193,7 +193,9 @@ impl HyperlightVm {
             // Linux `struct lowcore` `program_new_psw` @ real 0x1d0. All-zero lets KVM / the CPU
             // load an invalid PSW on program-interrupt presentation (e.g. after userspace
             // `KVM_S390_INTERRUPT`), which can recurse into `ICPT_OPEREXC` and spin the host run
-            // loop. Prime a disabled-wait PSW (big-endian doublewords: mask, IA).
+            // loop. Prime a disabled-wait PSW (big-endian doublewords: mask, IA). That state
+            // surfaces as `KVM_EXIT_S390_SIEIC` / `ICPT_WAIT` (`0x1c`); `kvm/s390x.rs` maps it to
+            // `VmExit::Halt` so the run loop can finish.
             const LC_PROGRAM_NEW_PSW: usize = 0x1d0;
             const PSW_MASK_WAIT: u64 = 0x0002_0000_0000_0000;
             const PSW_MASK_EA: u64 = 0x0000_0001_0000_0000;

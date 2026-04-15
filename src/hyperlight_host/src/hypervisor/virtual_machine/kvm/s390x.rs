@@ -46,6 +46,10 @@ const DEFAULT_S390_PSW_MASK: u64 = 0x0000_0001_8000_0000;
 /// Instruction interception: guest executed an instruction the kernel did not complete.
 /// Matches Linux `ICPT_INST`.
 const ICPT_INSTRUCTION: u8 = 0x04;
+/// Wait-state interception (`ICPT_WAIT`). With **disabled wait** (no EXT/IO/MCHK in the PSW),
+/// Linux `kvm_s390_handle_wait` returns `-EOPNOTSUPP` and KVM exits here (often after loading
+/// a program new PSW that enters wait). Decimal **28** == `0x1c`.
+const ICPT_WAIT: u8 = 0x1c;
 const S390_INSN_DIAG_OPCODE: u8 = 0x83;
 /// Length of `DIAG` on z/Architecture (no execute prefix).
 const S390_DIAG_INSN_LEN: u64 = 4;
@@ -224,13 +228,18 @@ impl KvmVm {
                     let run = vcpu.get_kvm_run();
                     let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
                     let gprs = unsafe { run.s.regs.gprs };
-                    if let Some((port, data)) =
+                    if sic.icptcode == ICPT_WAIT {
+                        // Disabled wait (or other wait paths deferred to userspace): no further
+                        // guest progress without device/timer emulation — treat like `Hlt` for the
+                        // minimal Hyperlight bring-up guest.
+                        RunExit::Halt
+                    } else if let Some((port, data)) =
                         decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
                     {
                         RunExit::IoOutAdvancePsw(port, data)
                     } else {
                         RunExit::Unknown(format!(
-                            "unhandled s390 SIE intercept: icpt={} ipa={:#x} ipb={:#x}",
+                            "unhandled s390 SIE intercept: icpt={:#x} ipa={:#x} ipb={:#x}",
                             sic.icptcode, sic.ipa, sic.ipb
                         ))
                     }
