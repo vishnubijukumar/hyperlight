@@ -250,14 +250,16 @@ impl HyperlightVm {
             return Ok(());
         };
 
-        // Map x86-style argument GPR slots; `rip` is PSW address, `rflags` 0 keeps KVM PSW mask.
+        // s390x ELF ABI: integer args in r2–r5 (`kvm_regs::gprs[2..5]` == rcx, rdx, rsi, rdi in
+        // `CommonRegisters`), stack in r15, return values in r2 (== `regs.rcx`).
+        // `rip` / `rflags` are the guest PSW IA and mask via `kvm_run`.
         let regs = CommonRegisters {
             rip: initialise,
-            rsp: self.rsp_gva - 8,
-            rdi: peb_addr.into(),
-            rsi: seed,
-            rdx: page_size.into(),
-            rcx: super::get_guest_log_filter(guest_max_log_level),
+            r15: self.rsp_gva,
+            rcx: peb_addr.into(),
+            rdx: seed,
+            rsi: page_size.into(),
+            rdi: super::get_guest_log_filter(guest_max_log_level),
             rflags: 0,
             ..Default::default()
         };
@@ -272,11 +274,12 @@ impl HyperlightVm {
         .map_err(InitializeError::Run)?;
 
         let regs = self.vm.regs()?;
-        if !regs.rsp.is_multiple_of(16) {
-            return Err(InitializeError::InvalidStackPointer(regs.rsp));
+        let sp = regs.r15;
+        if !sp.is_multiple_of(8) {
+            return Err(InitializeError::InvalidStackPointer(sp));
         }
-        self.rsp_gva = regs.rsp;
-        self.entrypoint = NextAction::Call(regs.rax);
+        self.rsp_gva = sp;
+        self.entrypoint = NextAction::Call(regs.rcx);
 
         Ok(())
     }
@@ -320,7 +323,7 @@ impl HyperlightVm {
 
         let regs = CommonRegisters {
             rip: dispatch_func_addr,
-            rsp: self.rsp_gva,
+            r15: self.rsp_gva,
             rflags,
             ..Default::default()
         };
