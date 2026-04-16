@@ -2262,6 +2262,20 @@ impl ReadonlySharedMemory {
         unsafe { std::slice::from_raw_parts(self.base_ptr(), self.mem_size()) }
     }
 
+    /// Host-only: patch a native-endian `u64` into the snapshot backing store.
+    ///
+    /// The sandbox must not be executing the guest while this runs (see
+    /// [`crate::mem::mgr::SandboxMemoryManager::update_scratch_bookkeeping`]).
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn host_write_native_u64_at(&self, offset: usize, value: u64) -> Result<()> {
+        bounds_check!(offset, size_of::<u64>(), self.mem_size());
+        let b = value.to_ne_bytes();
+        unsafe {
+            std::ptr::copy_nonoverlapping(b.as_ptr(), self.base_ptr().add(offset), 8);
+        }
+        Ok(())
+    }
+
     #[cfg(unshared_snapshot_mem)]
     pub(crate) fn copy_to_writable(&self) -> Result<ExclusiveSharedMemory> {
         let mut writable = ExclusiveSharedMemory::new(self.mem_size())?;

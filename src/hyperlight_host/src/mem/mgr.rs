@@ -560,8 +560,16 @@ impl SandboxMemoryManager<HostSharedMemory> {
         )?;
 
         #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
-        self.layout
-            .sync_s390_peb_io_scratch_pointers(&self.shared_mem, scratch_size)?;
+        self.layout.sync_s390_peb_io_scratch_pointers(scratch_size, |off, v| {
+            #[cfg(unshared_snapshot_mem)]
+            {
+                self.shared_mem.write(off, v)
+            }
+            #[cfg(not(unshared_snapshot_mem))]
+            {
+                self.shared_mem.host_write_native_u64_at(off, v)
+            }
+        })?;
 
         // Copy the page tables into the scratch region
         let snapshot_pt_end = self.shared_mem.mem_size();
