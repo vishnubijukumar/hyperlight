@@ -538,16 +538,15 @@ impl SandboxMemoryLayout {
     /// used for something else
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_first_free_scratch_gpa(&self) -> u64 {
-        self.get_pt_base_gpa() + self.pt_size.unwrap_or(0) as u64
+        self.get_first_free_scratch_gpa_for_scratch_size(self.scratch_size)
     }
 
-    /// Same as [`Self::get_first_free_scratch_gpa`], but using the live scratch mapping size
+    /// Same as [`Self::get_first_free_scratch_gpa`], but using an explicit scratch mapping size
     /// (`HostSharedMemory::mem_size` / `GuestSharedMemory::mem_size`) for the GPA base.
     ///
-    /// On s390x KVM the scratch slot starts at `scratch_base_gpa(live_scratch_size)`; this must
-    /// match the value used in `HyperlightVm::update_scratch_mapping` so metadata written at the
-    /// top of the scratch region describes the same guest-physical range.
-    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    /// On Linux s390x KVM the scratch slot starts at `scratch_base_gpa(live_scratch_size)`; when
+    /// the live mapping is MiB-aligned this must match `HyperlightVm::update_scratch_mapping` so
+    /// metadata at the top of the scratch region describes the same guest-physical range.
     pub(crate) fn get_first_free_scratch_gpa_for_scratch_size(
         &self,
         live_scratch_size: usize,

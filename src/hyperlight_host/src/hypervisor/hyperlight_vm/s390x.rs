@@ -168,6 +168,9 @@ impl HyperlightVm {
 
             s390x_lowcore_guest_mem: None,
 
+            #[cfg(not(feature = "nanvix-unstable"))]
+            root_pt_gpa: pml4_addr,
+
             mmap_regions: Vec::new(),
 
             pending_tlb_flush: false,
@@ -287,14 +290,17 @@ impl HyperlightVm {
     }
 
     pub(crate) fn get_root_pt(&self) -> Result<u64, AccessPageTableError> {
-        #[cfg(not(feature = "nanvix-unstable"))]
-        {
-            let sregs = self.vm.sregs()?;
-            Ok(sregs.cr3 & !0xfff_u64)
-        }
         #[cfg(feature = "nanvix-unstable")]
         {
             Ok(0)
+        }
+        #[cfg(not(feature = "nanvix-unstable"))]
+        {
+            // KVM s390x does not load x86-style page tables; `sregs().cr3` is meaningless (often 0).
+            // Snapshot rebuild and other host walks must use the GPA where the guest PT lives
+            // (`SandboxMemoryLayout::get_pt_base_gpa`), passed through `HyperlightVm::new` as
+            // `pml4_addr`.
+            Ok(self.root_pt_gpa)
         }
     }
 

@@ -538,12 +538,9 @@ impl SandboxMemoryManager<HostSharedMemory> {
         use hyperlight_common::layout::*;
         let scratch_size = self.scratch_mem.mem_size();
         self.update_scratch_bookkeeping_item(SCRATCH_TOP_SIZE_OFFSET, scratch_size as u64)?;
-        #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
         let first_free_scratch = self
             .layout
             .get_first_free_scratch_gpa_for_scratch_size(scratch_size);
-        #[cfg(not(all(target_arch = "s390x", not(feature = "nanvix-unstable"))))]
-        let first_free_scratch = self.layout.get_first_free_scratch_gpa();
         self.update_scratch_bookkeeping_item(SCRATCH_TOP_ALLOCATOR_OFFSET, first_free_scratch)?;
 
         // Initialise the guest input and output data buffers in

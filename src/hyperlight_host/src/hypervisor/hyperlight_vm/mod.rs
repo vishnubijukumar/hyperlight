@@ -395,6 +395,12 @@ pub(crate) struct HyperlightVm {
     #[cfg(target_arch = "s390x")]
     pub(super) s390x_lowcore_guest_mem: Option<GuestSharedMemory>,
 
+    /// Page-table root GPA for host-side walks (`Snapshot::new`, mem_profile, etc.). On x86 this
+    /// matches loaded CR3; s390x KVM does not install CR3, so we keep the value from
+    /// [`SandboxMemoryLayout::get_pt_base_gpa`] passed into [`HyperlightVm::new`].
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(super) root_pt_gpa: u64,
+
     pub(super) mmap_regions: Vec<(u32, MemoryRegion)>, // Later mapped regions (slot number, region)
 
     pub(super) pending_tlb_flush: bool,
