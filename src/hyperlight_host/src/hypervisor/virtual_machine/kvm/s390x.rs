@@ -74,6 +74,11 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
 /// the faulting `DIAG` (see Linux `arch/s390/kvm`).
+///
+/// KVM `DIAG` uses RS-a format; the diagnose **function code** is the low 16 bits of the
+/// second-operand address, computed exactly like Linux `kvm_s390_get_base_disp_rs` in
+/// `arch/s390/kvm/kvm-s390.h` (used by `kvm_s390_handle_diag`). The previous check against
+/// raw `ipb` halfwords did not match the kernel and could mis-classify intercepts.
 fn decode_s390_hyperlight_diag_io(
     icptcode: u8,
     ipa: u16,
@@ -86,9 +91,16 @@ fn decode_s390_hyperlight_diag_io(
     if (ipa >> 8) as u8 != S390_INSN_DIAG_OPCODE {
         return None;
     }
-    let i2_low = ipb as u16;
-    let i2_high = (ipb >> 16) as u16;
-    if i2_low != S390X_HYPERLIGHT_DIAG_IO && i2_high != S390X_HYPERLIGHT_DIAG_IO {
+    let base2 = ipb >> 28;
+    let disp2 = (ipb & 0x0fff_0000) >> 16;
+    let op2_addr = (if base2 == 0 {
+        0u64
+    } else {
+        gprs[base2 as usize]
+    })
+    .wrapping_add(u64::from(disp2));
+    let fc = (op2_addr & 0xffff) as u16;
+    if fc != S390X_HYPERLIGHT_DIAG_IO {
         return None;
     }
     let r1 = ((ipa >> 4) & 0xF) as usize;
@@ -344,8 +356,7 @@ impl VirtualMachine for KvmVm {
     fn set_regs(&self, regs: &CommonRegisters) -> std::result::Result<(), RegisterError> {
         let kvm_regs: kvm_regs = regs.into();
         let mut vcpu = self.vcpu_fd.lock().unwrap();
-        vcpu
-            .set_regs(&kvm_regs)
+        vcpu.set_regs(&kvm_regs)
             .map_err(|e| RegisterError::SetRegs(e.into()))?;
         let (addr, mask) = {
             let mut g = self.shadow_psw.lock().unwrap();
@@ -405,5 +416,36 @@ impl VirtualMachine for KvmVm {
             });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod hyperlight_diag_decode_tests {
+    use super::{ICPT_INSTRUCTION, S390_INSN_DIAG_OPCODE, decode_s390_hyperlight_diag_io};
+
+    #[test]
+    fn decode_matches_linux_kvm_s390_get_base_disp_rs() {
+        // RS-a: second-operand address low 16 bits = function code (see Linux kvm-s390.h).
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let r1: u8 = 2;
+        let r3: u8 = 3;
+        let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (r1 << 4) | r3]);
+        let mut gprs = [0u64; 16];
+        gprs[2] = 101;
+        gprs[3] = 0xdeadbeef;
+        let (port, payload) =
+            decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).unwrap();
+        assert_eq!(port, 101);
+        assert_eq!(payload, (gprs[3] as u32).to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn decode_rejects_wrong_function_code() {
+        let ipb = 0x03e7_0000u32; // disp2 = 0x3e7 → fc != 0x3e8
+        let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (2 << 4) | 3]);
+        let gprs = [0u64; 16];
+        assert!(decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).is_none());
     }
 }
