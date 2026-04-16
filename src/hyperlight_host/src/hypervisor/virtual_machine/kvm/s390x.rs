@@ -256,28 +256,28 @@ impl KvmVm {
                     // `kvm_run` sync area can lag or disagree with the faulting instruction's
                     // registers, which would mis-decode `DIAG` (e.g. wrong logical port) while the
                     // guest has already pushed host-call data to the output buffer.
-                    let gprs = match vcpu.get_regs() {
-                        Ok(r) => r.gprs,
-                        Err(e) => {
-                            return RunExit::Unknown(format!(
-                                "KVM_GET_REGS after S390Sieic failed: {e}"
-                            ));
+                    match vcpu.get_regs() {
+                        Ok(regs) => {
+                            let gprs = regs.gprs;
+                            if sic.icptcode == ICPT_WAIT {
+                                // Disabled wait (or other wait paths deferred to userspace): no further
+                                // guest progress without device/timer emulation — treat like `Hlt` for the
+                                // minimal Hyperlight bring-up guest.
+                                RunExit::Halt
+                            } else if let Some((port, data)) =
+                                decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
+                            {
+                                RunExit::IoOutAdvancePsw(port, data)
+                            } else {
+                                RunExit::Unknown(format!(
+                                    "unhandled s390 SIE intercept: icpt={:#x} ipa={:#x} ipb={:#x}",
+                                    sic.icptcode, sic.ipa, sic.ipb
+                                ))
+                            }
                         }
-                    };
-                    if sic.icptcode == ICPT_WAIT {
-                        // Disabled wait (or other wait paths deferred to userspace): no further
-                        // guest progress without device/timer emulation — treat like `Hlt` for the
-                        // minimal Hyperlight bring-up guest.
-                        RunExit::Halt
-                    } else if let Some((port, data)) =
-                        decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
-                    {
-                        RunExit::IoOutAdvancePsw(port, data)
-                    } else {
-                        RunExit::Unknown(format!(
-                            "unhandled s390 SIE intercept: icpt={:#x} ipa={:#x} ipb={:#x}",
-                            sic.icptcode, sic.ipa, sic.ipb
-                        ))
+                        Err(e) => RunExit::Unknown(format!(
+                            "KVM_GET_REGS after S390Sieic failed: {e}"
+                        )),
                     }
                 }
                 Ok(VcpuExit::MmioRead(addr, _)) => RunExit::MmioRead(addr),
