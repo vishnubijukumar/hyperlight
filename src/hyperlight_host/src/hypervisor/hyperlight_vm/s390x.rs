@@ -260,7 +260,9 @@ impl HyperlightVm {
             rdx: seed,
             rsi: page_size.into(),
             rdi: super::get_guest_log_filter(guest_max_log_level),
-            rflags: 0,
+            // Non-zero PSW mask: `KvmVm::set_regs` only replaces the shadow mask when `rflags` is
+            // set; use the same EA|BA runnable default as dispatch (DAT cleared in the KVM layer).
+            rflags: S390_DEFAULT_PSW_MASK,
             ..Default::default()
         };
         self.vm.set_regs(&regs)?;

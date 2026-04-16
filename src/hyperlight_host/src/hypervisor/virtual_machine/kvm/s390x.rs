@@ -43,6 +43,18 @@ use crate::sandbox::trace::TraceContext as SandboxTraceContext;
 /// `ptrace.h`; DAT is not set). Refined when the s390x guest ABI is fully defined.
 const DEFAULT_S390_PSW_MASK: u64 = 0x0000_0001_8000_0000;
 
+/// `PSW_MASK_DAT` from Linux `arch/s390/include/uapi/asm/ptrace.h`.
+///
+/// Until s390x loads z/Architecture translation tables, the PEB publishes scratch bases as
+/// **guest-physical** values that must be used as storage operands without DAT translation.
+/// KVM initial reset can leave DAT set in `kvm_run.psw_mask`; clear it whenever we own the mask.
+const PSW_MASK_DAT: u64 = 0x0400_0000_0000_0000;
+
+#[inline]
+fn psw_mask_hyperlight(mask: u64) -> u64 {
+    mask & !PSW_MASK_DAT
+}
+
 /// Instruction interception: guest executed an instruction the kernel did not complete.
 /// Matches Linux `ICPT_INST`.
 const ICPT_INSTRUCTION: u8 = 0x04;
@@ -179,11 +191,11 @@ impl KvmVm {
             let run = vcpu_fd.get_kvm_run();
             (run.psw_addr, run.psw_mask)
         };
-        let init_mask = if init_mask == 0 {
+        let init_mask = psw_mask_hyperlight(if init_mask == 0 {
             DEFAULT_S390_PSW_MASK
         } else {
             init_mask
-        };
+        });
 
         Ok(Self {
             vm_fd,
@@ -213,7 +225,7 @@ impl KvmVm {
                 let (addr, mask) = *self.shadow_psw.lock().unwrap();
                 let run = vcpu.get_kvm_run();
                 run.psw_addr = addr;
-                run.psw_mask = mask;
+                run.psw_mask = psw_mask_hyperlight(mask);
             }
             let m = match vcpu.run() {
                 Ok(VcpuExit::Hlt) => RunExit::Halt,
@@ -255,7 +267,7 @@ impl KvmVm {
                 let run = vcpu.get_kvm_run();
                 let mut g = self.shadow_psw.lock().unwrap();
                 g.0 = run.psw_addr;
-                g.1 = run.psw_mask;
+                g.1 = psw_mask_hyperlight(run.psw_mask);
             }
             m
         };
@@ -339,7 +351,9 @@ impl VirtualMachine for KvmVm {
             let mut g = self.shadow_psw.lock().unwrap();
             g.0 = regs.rip;
             if regs.rflags != 0 {
-                g.1 = regs.rflags;
+                g.1 = psw_mask_hyperlight(regs.rflags);
+            } else {
+                g.1 = psw_mask_hyperlight(g.1);
             }
             (g.0, g.1)
         };
