@@ -712,6 +712,13 @@ impl SandboxMemoryLayout {
         self.snapshot_size = new_size;
     }
 
+    /// Length of the contiguous guest snapshot bytes in host memory (code, heap, PEB, init
+    /// blob, plus appended page tables). This may be smaller than [`SharedMemory::mem_size`]
+    /// on Linux s390x, where scratch/snapshot mappings are rounded up to 1 MiB for KVM.
+    pub(crate) fn snapshot_image_len(&self) -> usize {
+        self.snapshot_size
+    }
+
     /// Get the size of the memory region used for page tables
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_pt_size(&self) -> usize {

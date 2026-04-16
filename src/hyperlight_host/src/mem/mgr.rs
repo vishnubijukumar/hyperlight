@@ -574,13 +574,27 @@ impl SandboxMemoryManager<HostSharedMemory> {
             }
         })?;
 
-        // Copy the page tables into the scratch region
-        let snapshot_pt_end = self.shared_mem.mem_size();
+        // Copy the page tables into the scratch region. Use the logical snapshot image length
+        // (`layout.snapshot_size`), not `SharedMemory::mem_size()`: on Linux s390x the latter is
+        // rounded up to a 1 MiB KVM guest-usable span and can include padding past the serialized
+        // snapshot bytes, which would shift this slice and copy the wrong PTE bytes.
+        let snapshot_img_end = self
+            .layout
+            .snapshot_image_len()
+            .min(self.shared_mem.mem_size());
         let snapshot_pt_size = self.layout.get_pt_size();
-        let snapshot_pt_start = snapshot_pt_end - snapshot_pt_size;
+        if snapshot_pt_size > snapshot_img_end {
+            return Err(new_error!(
+                "page table size {} bytes exceeds snapshot image span {} (host mem {})",
+                snapshot_pt_size,
+                snapshot_img_end,
+                self.shared_mem.mem_size()
+            ));
+        }
+        let snapshot_pt_start = snapshot_img_end - snapshot_pt_size;
         self.scratch_mem.with_exclusivity(|scratch| {
             #[cfg(not(unshared_snapshot_mem))]
-            let bytes = &self.shared_mem.as_slice()[snapshot_pt_start..snapshot_pt_end];
+            let bytes = &self.shared_mem.as_slice()[snapshot_pt_start..snapshot_img_end];
             #[cfg(unshared_snapshot_mem)]
             let bytes = {
                 let mut bytes = vec![0u8; snapshot_pt_size];
