@@ -452,11 +452,25 @@ impl SandboxMemoryLayout {
         self.get_init_data_size_offset() + size_of::<u64>()
     }
 
-    /// Get the guest virtual address of the start of output data.
+    /// Address of the start of the output data area as stored in the PEB `output_stack.ptr`.
+    ///
+    /// On amd64/aarch64 this is the guest virtual base (`scratch_base_gva`). On Linux s390x KVM
+    /// bring-up the vCPU does not load the snapshot page tables (`VirtualMachine::set_sregs` is a
+    /// no-op), so high canonical GVAs from the PEB would not resolve to the scratch slot. Use the
+    /// scratch guest-physical base instead so stores reach the memory registered at
+    /// [`hyperlight_common::layout::scratch_base_gpa`].
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_output_data_buffer_gva(&self) -> u64 {
-        hyperlight_common::layout::scratch_base_gva(self.scratch_size)
-            + self.sandbox_memory_config.get_input_data_size() as u64
+        #[cfg(target_arch = "s390x")]
+        {
+            hyperlight_common::layout::scratch_base_gpa(self.scratch_size)
+                + self.sandbox_memory_config.get_input_data_size() as u64
+        }
+        #[cfg(not(target_arch = "s390x"))]
+        {
+            hyperlight_common::layout::scratch_base_gva(self.scratch_size)
+                + self.sandbox_memory_config.get_input_data_size() as u64
+        }
     }
 
     /// Get the offset into the host scratch buffer of the start of
@@ -481,10 +495,19 @@ impl SandboxMemoryLayout {
         self.get_input_data_size_offset() + size_of::<u64>()
     }
 
-    /// Get the guest virtual address of the start of input data
+    /// Address of the start of the input data area as stored in the PEB `input_stack.ptr`.
+    ///
+    /// See [`Self::get_output_data_buffer_gva`] for s390x vs other architectures.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_input_data_buffer_gva(&self) -> u64 {
-        hyperlight_common::layout::scratch_base_gva(self.scratch_size)
+        #[cfg(target_arch = "s390x")]
+        {
+            hyperlight_common::layout::scratch_base_gpa(self.scratch_size)
+        }
+        #[cfg(not(target_arch = "s390x"))]
+        {
+            hyperlight_common::layout::scratch_base_gva(self.scratch_size)
+        }
     }
 
     /// Get the offset into the host scratch buffer of the start of
