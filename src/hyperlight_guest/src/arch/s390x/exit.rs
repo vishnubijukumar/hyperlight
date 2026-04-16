@@ -40,10 +40,12 @@ pub(crate) unsafe fn out32(port: u16, val: u32) {
     let p = port as u64;
     let v = val as u64;
     unsafe {
+        // Unnamed `in("r2")` / `in("r3")`: Rust forbids `name = in("r2") ...` (explicit regs
+        // cannot have operand names); use `%r2`/`%r3` in the template, not `{name}`.
         asm!(
-            "diag {p}, {v}, {fc}",
-            p = in("r2") p,
-            v = in("r3") v,
+            "diag %r2, %r3, {fc}",
+            in("r2") p,
+            in("r3") v,
             fc = const S390X_HYPERLIGHT_DIAG_IO,
             options(nostack),
         );
