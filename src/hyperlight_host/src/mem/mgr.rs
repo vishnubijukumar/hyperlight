@@ -538,10 +538,13 @@ impl SandboxMemoryManager<HostSharedMemory> {
         use hyperlight_common::layout::*;
         let scratch_size = self.scratch_mem.mem_size();
         self.update_scratch_bookkeeping_item(SCRATCH_TOP_SIZE_OFFSET, scratch_size as u64)?;
-        self.update_scratch_bookkeeping_item(
-            SCRATCH_TOP_ALLOCATOR_OFFSET,
-            self.layout.get_first_free_scratch_gpa(),
-        )?;
+        #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+        let first_free_scratch = self
+            .layout
+            .get_first_free_scratch_gpa_for_scratch_size(scratch_size);
+        #[cfg(not(all(target_arch = "s390x", not(feature = "nanvix-unstable"))))]
+        let first_free_scratch = self.layout.get_first_free_scratch_gpa();
+        self.update_scratch_bookkeeping_item(SCRATCH_TOP_ALLOCATOR_OFFSET, first_free_scratch)?;
 
         // Initialise the guest input and output data buffers in
         // scratch memory. TODO: remove the need for this.
@@ -555,6 +558,10 @@ impl SandboxMemoryManager<HostSharedMemory> {
             &sp,
             self.layout.get_output_data_buffer_scratch_host_offset(),
         )?;
+
+        #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+        self.layout
+            .sync_s390_peb_io_scratch_pointers(&self.shared_mem, scratch_size)?;
 
         // Copy the page tables into the scratch region
         let snapshot_pt_end = self.shared_mem.mem_size();

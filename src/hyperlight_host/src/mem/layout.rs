@@ -71,7 +71,11 @@ use super::memory_region::{
     DEFAULT_GUEST_BLOB_MEM_FLAGS, MemoryRegion, MemoryRegion_, MemoryRegionFlags, MemoryRegionKind,
     MemoryRegionVecBuilder,
 };
-#[cfg(any(gdb, feature = "mem_profile"))]
+#[cfg(any(
+    gdb,
+    feature = "mem_profile",
+    all(target_arch = "s390x", not(feature = "nanvix-unstable"))
+))]
 use super::shared_mem::HostSharedMemory;
 use super::shared_mem::{ExclusiveSharedMemory, ReadonlySharedMemory};
 use crate::error::HyperlightError::{MemoryRequestTooBig, MemoryRequestTooSmall};
@@ -539,6 +543,40 @@ impl SandboxMemoryLayout {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_first_free_scratch_gpa(&self) -> u64 {
         self.get_pt_base_gpa() + self.pt_size.unwrap_or(0) as u64
+    }
+
+    /// Same as [`Self::get_first_free_scratch_gpa`], but using the live scratch mapping size
+    /// (`HostSharedMemory::mem_size` / `GuestSharedMemory::mem_size`) for the GPA base.
+    ///
+    /// On s390x KVM the scratch slot starts at `scratch_base_gpa(live_scratch_size)`; this must
+    /// match the value used in `HyperlightVm::update_scratch_mapping` so metadata written at the
+    /// top of the scratch region describes the same guest-physical range.
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn get_first_free_scratch_gpa_for_scratch_size(
+        &self,
+        live_scratch_size: usize,
+    ) -> u64 {
+        hyperlight_common::layout::scratch_base_gpa(live_scratch_size)
+            + self.get_pt_base_scratch_offset() as u64
+            + self.pt_size.unwrap_or(0) as u64
+    }
+
+    /// Refresh PEB `input_stack.ptr` / `output_stack.ptr` for s390x so they use
+    /// `scratch_base_gpa(live_scratch_size)` (same base as the KVM scratch slot).
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn sync_s390_peb_io_scratch_pointers(
+        &self,
+        snapshot: &HostSharedMemory,
+        live_scratch_size: usize,
+    ) -> Result<()> {
+        let in_ptr = hyperlight_common::layout::scratch_base_gpa(live_scratch_size);
+        let out_ptr = in_ptr + self.sandbox_memory_config.get_input_data_size() as u64;
+        let in_ptr_off = self.peb_offset + offset_of!(HyperlightPEB, input_stack) + size_of::<u64>();
+        let out_ptr_off =
+            self.peb_offset + offset_of!(HyperlightPEB, output_stack) + size_of::<u64>();
+        snapshot.write(in_ptr_off, in_ptr)?;
+        snapshot.write(out_ptr_off, out_ptr)?;
+        Ok(())
     }
 
     /// Get the offset in guest memory to the heap size
