@@ -547,7 +547,14 @@ impl SandboxMemoryLayout {
         ))]
         {
             if mapped_size == self.scratch_size {
-                return Ok(self);
+                // `SandboxMemoryLayout::new` rounds `scratch_size` on s390x before storing it in
+                // `self.scratch_size`, but `sandbox_memory_config` still carries the pre-round
+                // `SandboxConfiguration` until we sync it here. Keep the config scratch size aligned
+                // with the live KVM mapping even when `with_mapped_scratch_size` is a no-op for
+                // the layout field.
+                let mut out = self;
+                out.sandbox_memory_config.set_scratch_size(mapped_size);
+                return Ok(out);
             }
             let min = hyperlight_common::layout::min_scratch_size(
                 self.sandbox_memory_config.get_input_data_size(),
@@ -601,7 +608,8 @@ impl SandboxMemoryLayout {
     ) -> Result<()> {
         let in_ptr = hyperlight_common::layout::scratch_base_gpa(live_scratch_size);
         let out_ptr = in_ptr + self.sandbox_memory_config.get_input_data_size() as u64;
-        let in_ptr_off = self.peb_offset + offset_of!(HyperlightPEB, input_stack) + size_of::<u64>();
+        let in_ptr_off =
+            self.peb_offset + offset_of!(HyperlightPEB, input_stack) + size_of::<u64>();
         let out_ptr_off =
             self.peb_offset + offset_of!(HyperlightPEB, output_stack) + size_of::<u64>();
         write_u64(in_ptr_off, in_ptr)?;

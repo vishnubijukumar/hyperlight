@@ -251,7 +251,19 @@ impl KvmVm {
                 Ok(VcpuExit::S390Sieic) => {
                     let run = vcpu.get_kvm_run();
                     let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
-                    let gprs = unsafe { run.s.regs.gprs };
+                    // Do not use `run.s.regs.gprs` for operand decoding: on s390 KVM the GPR file
+                    // at SIE intercept is authoritative via `KVM_GET_REGS` / `kvm_regs.gprs`. The
+                    // `kvm_run` sync area can lag or disagree with the faulting instruction's
+                    // registers, which would mis-decode `DIAG` (e.g. wrong logical port) while the
+                    // guest has already pushed host-call data to the output buffer.
+                    let gprs = match vcpu.get_regs() {
+                        Ok(r) => r.gprs,
+                        Err(e) => {
+                            return RunExit::Unknown(format!(
+                                "KVM_GET_REGS after S390Sieic failed: {e}"
+                            ));
+                        }
+                    };
                     if sic.icptcode == ICPT_WAIT {
                         // Disabled wait (or other wait paths deferred to userspace): no further
                         // guest progress without device/timer emulation — treat like `Hlt` for the
