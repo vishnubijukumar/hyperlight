@@ -24,17 +24,26 @@ use hyperlight_common::outb::S390X_HYPERLIGHT_DIAG_IO;
 
 /// Deliver a 32-bit value to the hypervisor on the logical “port” used for guest→host messages.
 ///
-/// Encoding matches the host decoder: `DIAG R1,R3,I2` with `I2 = S390X_HYPERLIGHT_DIAG_IO`,
-/// port in `GR[R1]`, value in `GR[R3]` (low 32 bits). The guest must run with a PSW that
-/// allows `DIAG` (supervisor state; same default as the rest of the s390x Hyperlight bring-up).
+/// Encoding matches the host decoder in `hyperlight-host` `kvm/s390x.rs`: `DIAG` RS form with
+/// diagnose code `S390X_HYPERLIGHT_DIAG_IO`, **port in `GR2`**, **value in `GR3`** (low 32 bits).
+///
+/// We pin `r2`/`r3` explicitly so the instruction’s `ipa` field always matches what the host
+/// decodes from `((ipa >> 4) & 0xf)` / `(ipa & 0xf)`. A free-register `in(reg)` choice can still
+/// produce a valid `DIAG`, but if userspace’s `ipa`/`ipb` view and LLVM’s allocation ever disagree
+/// with `KVM_GET_REGS`, the host could mis-read the logical port (e.g. treat a host-call as
+/// `OutBAction::CallFunction`) while the guest pushed payload for a different outb — surfacing as
+/// an empty output buffer (`stack pointer: 8`).
+///
+/// The guest must run with a PSW that allows `DIAG` (supervisor state; same default as the rest
+/// of the s390x Hyperlight bring-up).
 pub(crate) unsafe fn out32(port: u16, val: u32) {
     let p = port as u64;
     let v = val as u64;
     unsafe {
         asm!(
-            "diag {p},{v},{fc}",
-            p = in(reg) p,
-            v = in(reg) v,
+            "diag {p}, {v}, {fc}",
+            p = in("r2") p,
+            v = in("r3") v,
             fc = const S390X_HYPERLIGHT_DIAG_IO,
             options(nostack),
         );

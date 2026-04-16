@@ -73,7 +73,8 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
-/// the faulting `DIAG` (see Linux `arch/s390/kvm`).
+/// the faulting `DIAG` (see Linux `arch/s390/kvm`). The guest pins operands to **`r2`/`r3`**
+/// (`hyperlight_guest::arch::s390x::exit::out32`) so `ipa` and `KVM_GET_REGS` stay consistent.
 ///
 /// KVM `DIAG` uses RS-a format; the diagnose **function code** is the low 16 bits of the
 /// second-operand address, computed exactly like Linux `kvm_s390_get_base_disp_rs` in

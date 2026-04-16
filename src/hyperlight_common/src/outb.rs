@@ -124,9 +124,10 @@ pub enum VmAction {
 }
 
 /// Diagnose **function code** (low 16 bits of the RS-a second-operand address) used on Linux KVM
-/// s390x for Hyperlight guest `out32`. The in-kernel handler returns `-EOPNOTSUPP`, so userspace
-/// receives `KVM_EXIT_S390_SIEIC` and must derive the same code as Linux `kvm_s390_get_base_disp_rs`
-/// from `kvm_run` (`ipa` / `ipb` / GPRs).
+/// s390x for Hyperlight guest `out32`. The guest pins the logical port and value in **`r2` and
+/// `r3`** so `ipa` matches `KVM_GET_REGS` after `KVM_EXIT_S390_SIEIC`. The in-kernel handler returns
+/// `-EOPNOTSUPP`, so userspace receives `KVM_EXIT_S390_SIEIC` and must derive the same code as
+/// Linux `kvm_s390_get_base_disp_rs` from `kvm_run` (`ipa` / `ipb` / GPRs).
 pub const S390X_HYPERLIGHT_DIAG_IO: u16 = 0x3E8;
 
 impl TryFrom<u16> for OutBAction {
