@@ -534,14 +534,45 @@ impl SandboxMemoryLayout {
             + self.get_pt_base_scratch_offset() as u64
     }
 
-    /// Get the first GPA of the scratch region that the host hasn't
-    /// used for something else
-    #[instrument(skip_all, parent = Span::current(), level= "Trace")]
-    pub(crate) fn get_first_free_scratch_gpa(&self) -> u64 {
-        self.get_first_free_scratch_gpa_for_scratch_size(self.scratch_size)
+    /// On Linux s390x, [`ExclusiveSharedMemory::new`] rounds the requested size up to a 1 MiB
+    /// multiple for KVM. If the layout still carries the smaller requested size (e.g. from a
+    /// snapshot built elsewhere), GPA math (`get_pt_base_gpa`, [`Self::resolve_gpa`]) must match
+    /// the **live** mapping or page-table walks and scratch bookkeeping disagree with the guest.
+    #[instrument(skip_all, parent = Span::current(), level = "Trace")]
+    pub(crate) fn with_mapped_scratch_size(self, mapped_size: usize) -> Result<Self> {
+        #[cfg(all(
+            target_os = "linux",
+            target_arch = "s390x",
+            not(feature = "nanvix-unstable")
+        ))]
+        {
+            if mapped_size == self.scratch_size {
+                return Ok(self);
+            }
+            let min = hyperlight_common::layout::min_scratch_size(
+                self.sandbox_memory_config.get_input_data_size(),
+                self.sandbox_memory_config.get_output_data_size(),
+            );
+            if mapped_size < min {
+                return Err(MemoryRequestTooSmall(mapped_size, min));
+            }
+            let mut out = self;
+            out.scratch_size = mapped_size;
+            out.sandbox_memory_config.set_scratch_size(mapped_size);
+            return Ok(out);
+        }
+        #[cfg(not(all(
+            target_os = "linux",
+            target_arch = "s390x",
+            not(feature = "nanvix-unstable")
+        )))]
+        {
+            let _ = mapped_size;
+            Ok(self)
+        }
     }
 
-    /// Same as [`Self::get_first_free_scratch_gpa`], but using an explicit scratch mapping size
+    /// First free scratch GPA using an explicit scratch mapping size
     /// (`HostSharedMemory::mem_size` / `GuestSharedMemory::mem_size`) for the GPA base.
     ///
     /// On Linux s390x KVM the scratch slot starts at `scratch_base_gpa(live_scratch_size)`; when

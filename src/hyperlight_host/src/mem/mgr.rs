@@ -294,7 +294,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
     pub(crate) fn from_snapshot(s: &Snapshot) -> Result<Self> {
         let layout = *s.layout();
         let shared_mem = s.memory().to_mgr_snapshot_mem()?;
-        let scratch_mem = ExclusiveSharedMemory::new(s.layout().get_scratch_size())?;
+        let scratch_mem = ExclusiveSharedMemory::new(layout.get_scratch_size())?;
+        let layout = layout.with_mapped_scratch_size(scratch_mem.mem_size())?;
         let entrypoint = s.entrypoint();
         Ok(Self::new(layout, shared_mem, scratch_mem, entrypoint))
     }
@@ -317,10 +318,13 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
     )> {
         let (hshm, gshm) = self.shared_mem.build();
         let (hscratch, gscratch) = self.scratch_mem.build();
+        let layout = self
+            .layout
+            .with_mapped_scratch_size(hscratch.mem_size())?;
         let mut host_mgr = SandboxMemoryManager {
             shared_mem: hshm,
             scratch_mem: hscratch,
-            layout: self.layout,
+            layout,
             entrypoint: self.entrypoint,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: self.abort_buffer,
@@ -328,7 +332,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         let guest_mgr = SandboxMemoryManager {
             shared_mem: gshm,
             scratch_mem: gscratch,
-            layout: self.layout,
+            layout,
             entrypoint: self.entrypoint,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: Vec::new(), // Guest doesn't need abort buffer
@@ -523,6 +527,8 @@ impl SandboxMemoryManager<HostSharedMemory> {
             Some(gscratch)
         };
         self.layout = *snapshot.layout();
+        let live_scratch = self.scratch_mem.mem_size();
+        self.layout = self.layout.with_mapped_scratch_size(live_scratch)?;
         self.update_scratch_bookkeeping()?;
         Ok((gsnapshot, gscratch))
     }
