@@ -1114,12 +1114,12 @@ fn corrupt_output_size_prefix() -> i32 {
         #[cfg(all(target_arch = "s390x", target_os = "linux"))]
         {
             use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
-            let port = VmAction::Halt as u64;
-            let val = 0u64;
+            let p = VmAction::Halt as u64;
+            let v = 0u64;
             core::arch::asm!(
-                "diag {p},{v},{fc}",
-                p = in(reg) port,
-                v = in(reg) val,
+                "diag %r2, %r3, {fc}",
+                in("r2") p,
+                in("r3") v,
                 fc = const S390X_HYPERLIGHT_DIAG_IO,
                 options(nostack),
             );
@@ -1159,12 +1159,12 @@ fn corrupt_output_back_pointer() -> i32 {
         #[cfg(all(target_arch = "s390x", target_os = "linux"))]
         {
             use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
-            let port = VmAction::Halt as u64;
-            let val = 0u64;
+            let p = VmAction::Halt as u64;
+            let v = 0u64;
             core::arch::asm!(
-                "diag {p},{v},{fc}",
-                p = in(reg) port,
-                v = in(reg) val,
+                "diag %r2, %r3, {fc}",
+                in("r2") p,
+                in("r3") v,
                 fc = const S390X_HYPERLIGHT_DIAG_IO,
                 options(nostack),
             );

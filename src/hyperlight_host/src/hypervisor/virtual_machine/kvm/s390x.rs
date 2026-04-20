@@ -232,10 +232,16 @@ impl KvmVm {
             KernelErr(KvmErrno),
         }
 
+        // PSW address at `KVM_RUN` entry (mirrors `run.psw_addr` we program below). Used after a
+        // Hyperlight `DIAG` exit: some KVM versions leave `psw_addr` on the faulting instruction,
+        // others already advance it before returning `KVM_EXIT_S390_SIEIC`. Unconditionally adding
+        // `S390_DIAG_INSN_LEN` when the kernel already advanced would skip the next guest insn.
+        let mut ia_at_kvm_run_entry: u64 = 0;
         let mapped = {
             let mut vcpu = self.vcpu_fd.lock().unwrap();
             {
                 let (addr, mask) = *self.shadow_psw.lock().unwrap();
+                ia_at_kvm_run_entry = addr;
                 let run = vcpu.get_kvm_run();
                 run.psw_addr = addr;
                 run.psw_mask = psw_mask_hyperlight(mask);
@@ -302,7 +308,10 @@ impl KvmVm {
             RunExit::IoOut(port, data) => Ok(VmExit::IoOut(port, data)),
             RunExit::IoOutAdvancePsw(port, data) => {
                 let mut g = self.shadow_psw.lock().unwrap();
-                g.0 = g.0.wrapping_add(S390_DIAG_INSN_LEN);
+                let ia_after = g.0;
+                if ia_after == ia_at_kvm_run_entry {
+                    g.0 = ia_after.wrapping_add(S390_DIAG_INSN_LEN);
+                }
                 Ok(VmExit::IoOut(port, data))
             }
             RunExit::MmioRead(addr) => Ok(VmExit::MmioRead(addr)),

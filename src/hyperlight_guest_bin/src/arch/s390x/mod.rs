@@ -26,13 +26,15 @@ use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 /// Exit to the host with `VmAction::Halt` (amd64 OUT+hlt equivalent): used after init and dispatch.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn s390x_guest_vm_halt() -> ! {
-    let port = VmAction::Halt as u64;
-    let val = 0u64;
+    let p = VmAction::Halt as u64;
+    let v = 0u64;
     unsafe {
+        // Match `hyperlight_guest::arch::s390x::exit::out32`: pin GR2/GR3 so host `ipa`/`KVM_GET_REGS`
+        // always agree on the logical port for `kvm/s390x.rs` decode.
         core::arch::asm!(
-            "diag {p},{v},{fc}",
-            p = in(reg) port,
-            v = in(reg) val,
+            "diag %r2, %r3, {fc}",
+            in("r2") p,
+            in("r3") v,
             fc = const S390X_HYPERLIGHT_DIAG_IO,
             options(nostack),
         );
