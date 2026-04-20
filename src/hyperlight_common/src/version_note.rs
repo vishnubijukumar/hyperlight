@@ -90,6 +90,7 @@ impl<const NAME_SZ: usize, const DESC_SZ: usize> ElfNote<NAME_SZ, DESC_SZ> {
     ///
     /// Panics at compile time if `NAME_SZ` or `DESC_SZ` don't match
     /// `padded_name_size(name.len() + 1)` or `padded_desc_size(desc.len() + 1)`.
+    #[allow(clippy::disallowed_macros)] // These asserts are evaluated at compile time only (const fn).
     pub const fn new(name: &str, desc: &str, n_type: u32) -> Self {
         // NAME_SZ and DESC_SZ must match the padded sizes.
         assert!(

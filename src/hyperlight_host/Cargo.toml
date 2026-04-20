@@ -33,7 +33,7 @@ fallible-iterator = { version = "0.3.0", optional = true }
 blake3 = "1.8.4"
 page_size = "0.6.0"
 termcolor = "1.2.0"
-bitflags = "2.11.0"
+bitflags = "2.11.1"
 log = "0.4.29"
 opentelemetry = { version = "0.31.0", optional = true }
 tracing = { version = "0.1.44", features = ["log"] }
@@ -102,7 +102,7 @@ opentelemetry = "0.31.0"
 opentelemetry-otlp = { version = "0.31.1", default-features = false, features = ["http-proto", "reqwest-blocking-client", "grpc-tonic"] }
 opentelemetry-semantic-conventions = "0.31"
 opentelemetry_sdk = { version = "0.31.0", features = ["rt-tokio"] }
-tokio = { version = "1.51.1", features = ["full"] }
+tokio = { version = "1.52.0", features = ["full"] }
 criterion = "0.8.2"
 tracing-chrome = "0.7.2"
 metrics-util = "0.20.1"

@@ -17,6 +17,16 @@ limitations under the License.
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::panic))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::expect_used))]
 #![cfg_attr(not(any(test, debug_assertions)), warn(clippy::unwrap_used))]
+// clippy.toml disallows assert!/assert_eq!/assert_ne! via disallowed-macros.
+// That lint is active by default, so we suppress it globally here, then
+// selectively re-enable it for release host builds (feature = "std").
+// Guest targets (no std) are allowed asserts — panics are contained in the
+// micro-VM and cannot crash the host. Tests and debug builds are also allowed.
+#![allow(clippy::disallowed_macros)]
+#![cfg_attr(
+    not(any(test, debug_assertions, not(feature = "std"))),
+    warn(clippy::disallowed_macros)
+)]
 // We use Arbitrary during fuzzing, which requires std
 #![cfg_attr(not(feature = "fuzzing"), no_std)]
 
