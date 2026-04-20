@@ -26,6 +26,7 @@ use hyperlight_common::outb::S390X_HYPERLIGHT_DIAG_IO;
 ///
 /// Encoding matches the host decoder in `hyperlight-host` `kvm/s390x.rs`: `DIAG` RS form with
 /// diagnose code `S390X_HYPERLIGHT_DIAG_IO`, **port in `GR2`**, **value in `GR3`** (low 32 bits).
+/// (`hyperlight_guest_bin` VM halt uses **`GR4`/`GR5`** so **`GR2`** can hold the ELF return value.)
 ///
 /// We pin `r2`/`r3` explicitly so the instruction’s `ipa` field always matches what the host
 /// decodes from `((ipa >> 4) & 0xf)` / `(ipa & 0xf)`. A free-register `in(reg)` choice can still

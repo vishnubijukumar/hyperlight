@@ -15,7 +15,8 @@ limitations under the License.
  */
 
 // s390x guest: dispatch matches amd64’s asm stub shape — TLB hint via PSW condition code,
-// then halt via the same DIAG channel as `hyperlight_guest::arch::s390x::out32`.
+// then halt via the same Hyperlight `DIAG` channel as `out32` (operands on GR4/GR5 so GR2
+// keeps the `generic_init` return / dispatch address for the host).
 
 pub(crate) mod context;
 pub(crate) mod exception;
@@ -24,17 +25,19 @@ pub(crate) mod machine;
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 
 /// Exit to the host with `VmAction::Halt` (amd64 OUT+hlt equivalent): used after init and dispatch.
+///
+/// Uses **`%r4` / `%r5`** for the `DIAG` operands (not **`%r2` / `%r3`**): `generic_init` returns the
+/// dispatch entry in **`r2`** per the s390x ELF ABI, and `hyperlight_host` `initialise` reads that
+/// register to set `NextAction::Call`. `out32` guest→host I/O still pins **`%r2` / `%r3`**.
 #[unsafe(no_mangle)]
 unsafe extern "C" fn s390x_guest_vm_halt() -> ! {
     let p = VmAction::Halt as u64;
     let v = 0u64;
     unsafe {
-        // Match `hyperlight_guest::arch::s390x::exit::out32`: pin GR2/GR3 so host `ipa`/`KVM_GET_REGS`
-        // always agree on the logical port for `kvm/s390x.rs` decode.
         core::arch::asm!(
-            "diag %r2, %r3, {fc}",
-            in("r2") p,
-            in("r3") v,
+            "diag %r4, %r5, {fc}",
+            in("r4") p,
+            in("r5") v,
             fc = const S390X_HYPERLIGHT_DIAG_IO,
             options(nostack),
         );

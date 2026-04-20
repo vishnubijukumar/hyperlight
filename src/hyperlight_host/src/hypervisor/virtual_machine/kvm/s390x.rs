@@ -460,6 +460,8 @@ impl VirtualMachine for KvmVm {
 
 #[cfg(test)]
 mod hyperlight_diag_decode_tests {
+    use hyperlight_common::outb::VmAction;
+
     use super::{
         ICPT_INSTRUCTION, ICPT_INSTRUCTION_PROGI, S390_INSN_DIAG_OPCODE,
         decode_s390_hyperlight_diag_io,
@@ -496,6 +498,21 @@ mod hyperlight_diag_decode_tests {
             decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION_PROGI, ipa, ipb, &gprs).unwrap();
         assert_eq!(port, 42);
         assert_eq!(payload, 7u32.to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn decode_vm_halt_diag_uses_gr4_gr5() {
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (4 << 4) | 5]);
+        let mut gprs = [0u64; 16];
+        gprs[4] = u64::from(VmAction::Halt as u16);
+        gprs[5] = 0;
+        let (port, payload) =
+            decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).unwrap();
+        assert_eq!(port, VmAction::Halt as u16);
+        assert_eq!(payload, 0u32.to_le_bytes().to_vec());
     }
 
     #[test]

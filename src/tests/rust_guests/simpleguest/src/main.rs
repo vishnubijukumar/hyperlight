@@ -1117,9 +1117,9 @@ fn corrupt_output_size_prefix() -> i32 {
             let p = VmAction::Halt as u64;
             let v = 0u64;
             core::arch::asm!(
-                "diag %r2, %r3, {fc}",
-                in("r2") p,
-                in("r3") v,
+                "diag %r4, %r5, {fc}",
+                in("r4") p,
+                in("r5") v,
                 fc = const S390X_HYPERLIGHT_DIAG_IO,
                 options(nostack),
             );
@@ -1162,9 +1162,9 @@ fn corrupt_output_back_pointer() -> i32 {
             let p = VmAction::Halt as u64;
             let v = 0u64;
             core::arch::asm!(
-                "diag %r2, %r3, {fc}",
-                in("r2") p,
-                in("r3") v,
+                "diag %r4, %r5, {fc}",
+                in("r4") p,
+                in("r5") v,
                 fc = const S390X_HYPERLIGHT_DIAG_IO,
                 options(nostack),
             );
