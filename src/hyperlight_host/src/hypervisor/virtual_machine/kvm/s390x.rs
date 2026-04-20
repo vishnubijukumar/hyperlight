@@ -379,12 +379,22 @@ impl VirtualMachine for KvmVm {
     }
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
-        let kvm_regs = self
-            .vcpu_fd
-            .lock()
-            .unwrap()
+        let mut vcpu = self.vcpu_fd.lock().unwrap();
+        let mut kvm_regs = vcpu
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;
+        // After `KVM_EXIT_S390_SIEIC`, GPRs for the faulting instruction are often published in
+        // `kvm_run.s.regs` when `kvm_valid_regs` includes `KVM_SYNC_GPRS`; `KVM_GET_REGS` alone can
+        // leave stale values. Hyperlight needs the real file (e.g. TOC / callee-saved GPRs) when
+        // re-entering the guest for `dispatch_function`.
+        let valid = {
+            let run = vcpu.get_kvm_run();
+            run.kvm_valid_regs
+        };
+        if valid & u64::from(KVM_SYNC_GPRS) != 0 {
+            let run = vcpu.get_kvm_run();
+            kvm_regs.gprs = unsafe { run.s.regs }.gprs;
+        }
         let mut r = CommonRegisters::from(&kvm_regs);
         let (addr, mask) = *self.shadow_psw.lock().unwrap();
         r.rip = addr;

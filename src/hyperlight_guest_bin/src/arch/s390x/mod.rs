@@ -79,7 +79,8 @@ pub extern "C" fn entrypoint(
     ops: u64,
     max_log_level: u64,
 ) -> ! {
-    let dispatch = crate::generic_init(peb_address, seed, ops, max_log_level);
+    // `inlateout("r2")` requires `mut`: the operand is written back by the assembler.
+    let mut dispatch = crate::generic_init(peb_address, seed, ops, max_log_level);
     unsafe {
         core::arch::asm!(
             "diag %r4, %r5, {fc}",
