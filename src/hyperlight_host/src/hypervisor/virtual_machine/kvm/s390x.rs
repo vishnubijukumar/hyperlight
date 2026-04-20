@@ -120,7 +120,7 @@ fn decode_s390_hyperlight_diag_io(
 /// Linux `kvm_s390_get_base_disp_rs` (and in-kernel `kvm_s390_handle_diag`) uses
 /// `vcpu->run->s.regs.gprs`. Prefer that view when `kvm_valid_regs` advertises `KVM_SYNC_GPRS`;
 /// otherwise fall back to `KVM_GET_REGS` so operand decode matches the faulting instruction.
-fn gpr_file_for_s390_sie_decode(vcpu: &VcpuFd) -> std::result::Result<[u64; 16], KvmErrno> {
+fn gpr_file_for_s390_sie_decode(vcpu: &mut VcpuFd) -> std::result::Result<[u64; 16], KvmErrno> {
     let valid = {
         let run = vcpu.get_kvm_run();
         run.kvm_valid_regs
@@ -277,9 +277,11 @@ impl KvmVm {
                     }
                 }
                 Ok(VcpuExit::S390Sieic) => {
-                    let run = vcpu.get_kvm_run();
-                    let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
-                    match gpr_file_for_s390_sie_decode(&vcpu) {
+                    let sic = {
+                        let run = vcpu.get_kvm_run();
+                        unsafe { run.__bindgen_anon_1.s390_sieic }
+                    };
+                    match gpr_file_for_s390_sie_decode(&mut vcpu) {
                         Ok(gprs) => {
                             if sic.icptcode == ICPT_WAIT {
                                 // Disabled wait (or other wait paths deferred to userspace): no further
