@@ -18,7 +18,9 @@ use std::sync::LazyLock;
 use std::sync::Mutex;
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
-use kvm_bindings::{KVM_CAP_S390_IRQCHIP, kvm_enable_cap, kvm_regs, kvm_userspace_memory_region};
+use kvm_bindings::{
+    KVM_CAP_S390_IRQCHIP, KVM_SYNC_GPRS, kvm_enable_cap, kvm_regs, kvm_userspace_memory_region,
+};
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Error as KvmErrno, Kvm, VcpuExit, VcpuFd, VmFd};
 use tracing::{Span, instrument};
@@ -58,6 +60,8 @@ fn psw_mask_hyperlight(mask: u64) -> u64 {
 /// Instruction interception: guest executed an instruction the kernel did not complete.
 /// Matches Linux `ICPT_INST`.
 const ICPT_INSTRUCTION: u8 = 0x04;
+/// Instruction interception with concurrent program-interruption indication (`ICPT_INSTPROGI`).
+const ICPT_INSTRUCTION_PROGI: u8 = 0x0c;
 /// Wait-state interception (`ICPT_WAIT`). With **disabled wait** (no EXT/IO/MCHK in the PSW),
 /// Linux `kvm_s390_handle_wait` returns `-EOPNOTSUPP` and KVM exits here (often after loading
 /// a program new PSW that enters wait). Decimal **28** == `0x1c`.
@@ -74,7 +78,7 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
 /// the faulting `DIAG` (see Linux `arch/s390/kvm`). The guest pins operands to **`r2`/`r3`**
-/// (`hyperlight_guest::arch::s390x::exit::out32`) so `ipa` and `KVM_GET_REGS` stay consistent.
+/// (`hyperlight_guest::arch::s390x::exit::out32`) so `ipa` and the GPR file stay consistent.
 ///
 /// KVM `DIAG` uses RS-a format; the diagnose **function code** is the low 16 bits of the
 /// second-operand address, computed exactly like Linux `kvm_s390_get_base_disp_rs` in
@@ -86,7 +90,7 @@ fn decode_s390_hyperlight_diag_io(
     ipb: u32,
     gprs: &[u64; 16],
 ) -> Option<(u16, Vec<u8>)> {
-    if icptcode != ICPT_INSTRUCTION {
+    if icptcode != ICPT_INSTRUCTION && icptcode != ICPT_INSTRUCTION_PROGI {
         return None;
     }
     if (ipa >> 8) as u8 != S390_INSN_DIAG_OPCODE {
@@ -109,6 +113,24 @@ fn decode_s390_hyperlight_diag_io(
     let port = gprs[r1] as u16;
     let val = gprs[r3] as u32;
     Some((port, val.to_le_bytes().to_vec()))
+}
+
+/// GPRs for SIE instruction intercept decoding.
+///
+/// Linux `kvm_s390_get_base_disp_rs` (and in-kernel `kvm_s390_handle_diag`) uses
+/// `vcpu->run->s.regs.gprs`. Prefer that view when `kvm_valid_regs` advertises `KVM_SYNC_GPRS`;
+/// otherwise fall back to `KVM_GET_REGS` so operand decode matches the faulting instruction.
+fn gpr_file_for_s390_sie_decode(vcpu: &VcpuFd) -> std::result::Result<[u64; 16], KvmErrno> {
+    let valid = {
+        let run = vcpu.get_kvm_run();
+        run.kvm_valid_regs
+    };
+    if valid & u64::from(KVM_SYNC_GPRS) != 0 {
+        let run = vcpu.get_kvm_run();
+        Ok(unsafe { run.s.regs }.gprs)
+    } else {
+        vcpu.get_regs().map(|r| r.gprs)
+    }
 }
 
 /// Return `true` if KVM is available, API version is 12, and `KVM_CAP_USER_MEMORY` is present.
@@ -257,14 +279,8 @@ impl KvmVm {
                 Ok(VcpuExit::S390Sieic) => {
                     let run = vcpu.get_kvm_run();
                     let sic = unsafe { run.__bindgen_anon_1.s390_sieic };
-                    // Do not use `run.s.regs.gprs` for operand decoding: on s390 KVM the GPR file
-                    // at SIE intercept is authoritative via `KVM_GET_REGS` / `kvm_regs.gprs`. The
-                    // `kvm_run` sync area can lag or disagree with the faulting instruction's
-                    // registers, which would mis-decode `DIAG` (e.g. wrong logical port) while the
-                    // guest has already pushed host-call data to the output buffer.
-                    match vcpu.get_regs() {
-                        Ok(regs) => {
-                            let gprs = regs.gprs;
+                    match gpr_file_for_s390_sie_decode(&vcpu) {
+                        Ok(gprs) => {
                             if sic.icptcode == ICPT_WAIT {
                                 // Disabled wait (or other wait paths deferred to userspace): no further
                                 // guest progress without device/timer emulation — treat like `Hlt` for the
@@ -282,7 +298,7 @@ impl KvmVm {
                             }
                         }
                         Err(e) => RunExit::Unknown(format!(
-                            "KVM_GET_REGS after S390Sieic failed: {e}"
+                            "GPR file for S390Sieic decode failed: {e}"
                         )),
                     }
                 }
@@ -442,7 +458,10 @@ impl VirtualMachine for KvmVm {
 
 #[cfg(test)]
 mod hyperlight_diag_decode_tests {
-    use super::{ICPT_INSTRUCTION, S390_INSN_DIAG_OPCODE, decode_s390_hyperlight_diag_io};
+    use super::{
+        ICPT_INSTRUCTION, ICPT_INSTRUCTION_PROGI, S390_INSN_DIAG_OPCODE,
+        decode_s390_hyperlight_diag_io,
+    };
 
     #[test]
     fn decode_matches_linux_kvm_s390_get_base_disp_rs() {
@@ -460,6 +479,21 @@ mod hyperlight_diag_decode_tests {
             decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).unwrap();
         assert_eq!(port, 101);
         assert_eq!(payload, (gprs[3] as u32).to_le_bytes().to_vec());
+    }
+
+    #[test]
+    fn decode_accepts_icpt_instprogi() {
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (2 << 4) | 3]);
+        let mut gprs = [0u64; 16];
+        gprs[2] = 42;
+        gprs[3] = 7;
+        let (port, payload) =
+            decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION_PROGI, ipa, ipb, &gprs).unwrap();
+        assert_eq!(port, 42);
+        assert_eq!(payload, 7u32.to_le_bytes().to_vec());
     }
 
     #[test]
