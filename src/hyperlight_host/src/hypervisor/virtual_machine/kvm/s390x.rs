@@ -343,7 +343,13 @@ impl KvmVm {
                 if ia_after == ia_at_kvm_run_entry {
                     g.0 = ia_after.wrapping_add(S390_DIAG_INSN_LEN);
                 }
-                Ok(VmExit::IoOut(port, data))
+                drop(g);
+                // Match `kvm/x86_64.rs`: port 108 is `VmAction::Halt`, not `OutBAction` (see `outb.rs`).
+                if port == VmAction::Halt as u16 {
+                    Ok(VmExit::Halt())
+                } else {
+                    Ok(VmExit::IoOut(port, data))
+                }
             }
             RunExit::MmioRead(addr) => Ok(VmExit::MmioRead(addr)),
             RunExit::MmioWrite(addr) => Ok(VmExit::MmioWrite(addr)),
