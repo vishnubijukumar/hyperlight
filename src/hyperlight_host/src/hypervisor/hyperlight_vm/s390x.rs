@@ -190,9 +190,8 @@ impl HyperlightVm {
         // must be backed or the first `KVM_RUN` can fail with `EFAULT` when the kernel touches it.
         {
             const MIB: usize = 1 << 20;
-            let mut low_eshm = ExclusiveSharedMemory::new(MIB).map_err(|e| {
-                CreateHyperlightVmError::SharedMemorySetup(e.to_string())
-            })?;
+            let mut low_eshm = ExclusiveSharedMemory::new(MIB)
+                .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(e.to_string()))?;
             // Linux `struct lowcore` `program_new_psw` @ real 0x1d0. All-zero lets KVM / the CPU
             // load an invalid PSW on program-interrupt presentation (e.g. after userspace
             // `KVM_S390_INTERRUPT`), which can recurse into `ICPT_OPEREXC` and spin the host run
@@ -329,11 +328,15 @@ impl HyperlightVm {
         };
         let rflags = s390_psw_mask_for_dispatch(base_psw_mask, self.pending_tlb_flush);
 
+        // Keep the full GPR file from the last guest-visible state (e.g. after `generic_init` or
+        // a prior halt). Zeroing the rest broke Linux/s390x guests: the ELF ABI uses r12 (TOC) and
+        // other callee-saved registers across calls; `KvmVm::regs()` already merges
+        // `kvm_run.s.regs` when `KVM_SYNC_GPRS` is set.
         let regs = CommonRegisters {
             rip: dispatch_func_addr,
             r15: self.rsp_gva,
             rflags,
-            ..Default::default()
+            ..r_current
         };
         self.vm
             .set_regs(&regs)

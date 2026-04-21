@@ -29,9 +29,7 @@ use hyperlight_common::flatbuffer_wrappers::guest_error::ErrorCode;
 pub unsafe fn alloc_phys_pages(n: u64) -> u64 {
     let addr = crate::layout::allocator_gva();
     let nbytes = n * hyperlight_common::vmem::PAGE_SIZE as u64;
-    let x = unsafe {
-        AtomicU64::from_ptr(addr as *mut u64).fetch_add(nbytes, Ordering::SeqCst)
-    };
+    let x = unsafe { AtomicU64::from_ptr(addr as *mut u64).fetch_add(nbytes, Ordering::SeqCst) };
     let max_avail = hyperlight_common::layout::MAX_GPA - hyperlight_common::vmem::PAGE_SIZE * 2;
     if x.checked_add(nbytes)
         .is_none_or(|xx| xx >= max_avail as u64)

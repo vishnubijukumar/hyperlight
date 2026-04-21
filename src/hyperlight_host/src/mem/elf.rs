@@ -262,10 +262,9 @@ impl ElfInfo {
                     }
                     R_390_64 => {
                         let addend = get_addend("R_390_64", r)?;
-                        let sym = self
-                            .s390x_dynsyms
-                            .get(r.r_sym)
-                            .ok_or_else(|| new_error!("R_390_64: symbol index {} out of range", r.r_sym))?;
+                        let sym = self.s390x_dynsyms.get(r.r_sym).ok_or_else(|| {
+                            new_error!("R_390_64: symbol index {} out of range", r.r_sym)
+                        })?;
                         if sym.is_import() {
                             log_then_return!(
                                 "R_390_64: unresolved dynamic import (symbol index {})",

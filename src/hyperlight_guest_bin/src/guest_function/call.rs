@@ -85,7 +85,9 @@ pub(crate) fn call_guest_function(function_call: FunctionCall) -> Result<Vec<u8>
     }
 }
 
-pub(crate) fn internal_dispatch_function() {
+/// Entered from the s390x `dispatch_function` asm stub via `brasl` (amd64 uses `call`).
+/// `extern "C"` matches the platform ELF ABI expected for that entry sequence.
+pub(crate) extern "C" fn internal_dispatch_function() {
     // Read the current TSC to report it to the host with the spans/events
     // This helps calculating the timestamps relative to the guest call
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]

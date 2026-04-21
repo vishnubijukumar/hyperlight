@@ -490,9 +490,8 @@ impl ExclusiveSharedMemory {
         }
 
         const MIB: usize = 1 << 20;
-        let usable_len = round_guest_usable_len_up_mib(min_size_bytes).ok_or_else(|| {
-            new_error!("Memory required for sandbox exceeded usize::MAX")
-        })?;
+        let usable_len = round_guest_usable_len_up_mib(min_size_bytes)
+            .ok_or_else(|| new_error!("Memory required for sandbox exceeded usize::MAX"))?;
 
         let map_len = usable_len
             .checked_add(2 * PAGE_SIZE_USIZE)
@@ -896,9 +895,7 @@ impl GuestSharedMemory {
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
             }
             #[cfg(target_arch = "s390x")]
-            MemoryRegionType::S390xLowcore => {
-                MemoryRegionFlags::READ | MemoryRegionFlags::WRITE
-            }
+            MemoryRegionType::S390xLowcore => MemoryRegionFlags::READ | MemoryRegionFlags::WRITE,
             #[cfg(unshared_snapshot_mem)]
             MemoryRegionType::Snapshot => {
                 MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE
@@ -2123,7 +2120,8 @@ mod tests {
             hshm.push_buffer(0, mem_size, &data).unwrap();
 
             // Write 0xFFFF_FFFD as size prefix: checked_add(4) returns None.
-            hshm.copy_from_slice(&0xFFFF_FFFDu32.to_le_bytes(), 8).unwrap();
+            hshm.copy_from_slice(&0xFFFF_FFFDu32.to_le_bytes(), 8)
+                .unwrap();
 
             let result: Result<RawBytes> = hshm.try_pop_buffer_into(0, mem_size);
             let err_msg = format!("{}", result.unwrap_err());

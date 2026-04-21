@@ -52,9 +52,18 @@ const DEFAULT_S390_PSW_MASK: u64 = 0x0000_0001_8000_0000;
 /// KVM initial reset can leave DAT set in `kvm_run.psw_mask`; clear it whenever we own the mask.
 const PSW_MASK_DAT: u64 = 0x0400_0000_0000_0000;
 
+/// `PSW_MASK_PSTATE` from Linux `arch/s390/include/uapi/asm/ptrace.h` (problem / user state).
+///
+/// When **set**, the CPU rejects **privileged** instructions. The guest dispatch trampoline may
+/// execute **`PTLB`** when the host sets `pending_tlb_flush` (same role as the amd64 CR4 flush).
+/// KVM can propagate **PSTATE=1** into `kvm_run.psw_mask` across exits; if the next entry runs
+/// dispatch with **CC≠0** and **PSTATE** still set, **`PTLB`** traps before Rust code runs and the
+/// host never sees guest output (`try_pop_buffer_into` still sees stack pointer `8`).
+const PSW_MASK_PSTATE: u64 = 0x0001_0000_0000_0000;
+
 #[inline]
 fn psw_mask_hyperlight(mask: u64) -> u64 {
-    mask & !PSW_MASK_DAT
+    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE
 }
 
 /// Instruction interception: guest executed an instruction the kernel did not complete.
@@ -84,6 +93,8 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 /// second-operand address, computed exactly like Linux `kvm_s390_get_base_disp_rs` in
 /// `arch/s390/kvm/kvm-s390.h` (used by `kvm_s390_handle_diag`). The previous check against
 /// raw `ipb` halfwords did not match the kernel and could mis-classify intercepts.
+/// Instruction layout and operand addressing follow IBM *z/Architecture Principles of Operation*
+/// (SA22-7832), *Diagnose*; see <https://publibfp.dhe.ibm.com/epubs/pdf/a227832d.pdf>.
 fn decode_s390_hyperlight_diag_io(
     icptcode: u8,
     ipa: u16,
@@ -288,9 +299,12 @@ impl KvmVm {
                                 // guest progress without device/timer emulation — treat like `Hlt` for the
                                 // minimal Hyperlight bring-up guest.
                                 RunExit::Halt
-                            } else if let Some((port, data)) =
-                                decode_s390_hyperlight_diag_io(sic.icptcode, sic.ipa, sic.ipb, &gprs)
-                            {
+                            } else if let Some((port, data)) = decode_s390_hyperlight_diag_io(
+                                sic.icptcode,
+                                sic.ipa,
+                                sic.ipb,
+                                &gprs,
+                            ) {
                                 RunExit::IoOutAdvancePsw(port, data)
                             } else {
                                 RunExit::Unknown(format!(
@@ -299,9 +313,9 @@ impl KvmVm {
                                 ))
                             }
                         }
-                        Err(e) => RunExit::Unknown(format!(
-                            "GPR file for S390Sieic decode failed: {e}"
-                        )),
+                        Err(e) => {
+                            RunExit::Unknown(format!("GPR file for S390Sieic decode failed: {e}"))
+                        }
                     }
                 }
                 Ok(VcpuExit::MmioRead(addr, _)) => RunExit::MmioRead(addr),

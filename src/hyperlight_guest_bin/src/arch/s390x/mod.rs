@@ -14,9 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
  */
 
-// s390x guest: dispatch matches amd64’s asm stub shape — TLB hint via PSW condition code,
-// then halt via the same Hyperlight `DIAG` channel as `out32` (operands on GR4/GR5 so GR2
-// keeps the `generic_init` return / dispatch address for the host).
+// s390x guest: `dispatch_function` calls Rust `internal_dispatch_function`, then halts via the
+// same Hyperlight `DIAG` channel as `out32` (operands on GR4/GR5 so GR2 keeps the `generic_init`
+// return / dispatch address for the host). We intentionally omit amd64’s TLB-flush prelude
+// (`PTLB` + PSW CC): KVM s390x does not load the snapshot page tables, and `PTLB` prevented
+// reaching dispatch in testing (host saw an empty output buffer).
 
 pub(crate) mod context;
 pub(crate) mod exception;
@@ -47,13 +49,9 @@ unsafe extern "C" fn s390x_guest_vm_halt() -> ! {
     }
 }
 
-// `brc 8, 1f`: branch if CC == 0 (same sense as amd64 `jnz` over ZF — skip flush when no hint).
 core::arch::global_asm!(
     ".global dispatch_function",
     "dispatch_function:",
-    "    brc 8, 1f",
-    "    ptlb",
-    "1:",
     "    brasl %r14, {internal}",
     "    brasl %r14, {halt}",
     internal = sym crate::guest_function::call::internal_dispatch_function,
@@ -73,12 +71,7 @@ pub mod dispatch {
 /// (`inlateout("r2")`); a plain Rust call to [`s390x_guest_vm_halt`] can let LLVM spill the return
 /// of `generic_init` before the hypercall.
 #[unsafe(no_mangle)]
-pub extern "C" fn entrypoint(
-    peb_address: u64,
-    seed: u64,
-    ops: u64,
-    max_log_level: u64,
-) -> ! {
+pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) -> ! {
     // `inlateout("r2")` requires `mut`: the operand is written back by the assembler.
     let mut dispatch = crate::generic_init(peb_address, seed, ops, max_log_level);
     unsafe {

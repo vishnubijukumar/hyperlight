@@ -318,9 +318,7 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
     )> {
         let (hshm, gshm) = self.shared_mem.build();
         let (hscratch, gscratch) = self.scratch_mem.build();
-        let layout = self
-            .layout
-            .with_mapped_scratch_size(hscratch.mem_size())?;
+        let layout = self.layout.with_mapped_scratch_size(hscratch.mem_size())?;
         let mut host_mgr = SandboxMemoryManager {
             shared_mem: hshm,
             scratch_mem: hscratch,
@@ -553,26 +551,25 @@ impl SandboxMemoryManager<HostSharedMemory> {
         // scratch memory. TODO: remove the need for this.
         // Stack cursor uses fixed little-endian u64 (see `hyperlight_guest::guest_handle::io`).
         let sp = SandboxMemoryLayout::STACK_POINTER_SIZE_BYTES.to_le_bytes();
-        self.scratch_mem.copy_from_slice(
-            &sp,
-            self.layout.get_input_data_buffer_scratch_host_offset(),
-        )?;
+        self.scratch_mem
+            .copy_from_slice(&sp, self.layout.get_input_data_buffer_scratch_host_offset())?;
         self.scratch_mem.copy_from_slice(
             &sp,
             self.layout.get_output_data_buffer_scratch_host_offset(),
         )?;
 
         #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
-        self.layout.sync_s390_peb_io_scratch_pointers(scratch_size, |off, v| {
-            #[cfg(unshared_snapshot_mem)]
-            {
-                self.shared_mem.write(off, v)
-            }
-            #[cfg(not(unshared_snapshot_mem))]
-            {
-                self.shared_mem.host_write_native_u64_at(off, v)
-            }
-        })?;
+        self.layout
+            .sync_s390_peb_io_scratch_pointers(scratch_size, |off, v| {
+                #[cfg(unshared_snapshot_mem)]
+                {
+                    self.shared_mem.write(off, v)
+                }
+                #[cfg(not(unshared_snapshot_mem))]
+                {
+                    self.shared_mem.host_write_native_u64_at(off, v)
+                }
+            })?;
 
         // Copy the page tables into the scratch region. Use the logical snapshot image length
         // (`layout.snapshot_size`), not `SharedMemory::mem_size()`: on Linux s390x the latter is

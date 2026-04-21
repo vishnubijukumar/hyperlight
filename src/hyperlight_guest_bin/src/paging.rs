@@ -17,9 +17,7 @@ limitations under the License.
 // Non-amd64 guests (e.g. s390x KVM, aarch64 bring-up) do not program guest page tables here.
 #[cfg(not(target_arch = "x86_64"))]
 mod identity_paging {
-    use hyperlight_common::vmem::{
-        self, BasicMapping, MappingKind, PhysAddr, VirtAddr, PAGE_SIZE,
-    };
+    use hyperlight_common::vmem::{self, BasicMapping, MappingKind, PAGE_SIZE, PhysAddr, VirtAddr};
 
     /// KVM s390x guests use host-managed translation; guest code does not program page tables.
     ///
@@ -176,7 +174,12 @@ mod x86_64 {
     ///   as such do not use concurrently with any other page table operations
     /// - TLB invalidation is not performed,
     ///   if previously-unmapped ranges are not being mapped, TLB invalidation may need to be performed afterwards.
-    pub unsafe fn map_region(phys_base: u64, virt_base: *mut u8, len: u64, kind: vmem::MappingKind) {
+    pub unsafe fn map_region(
+        phys_base: u64,
+        virt_base: *mut u8,
+        len: u64,
+        kind: vmem::MappingKind,
+    ) {
         unsafe {
             vmem::map(
                 &GuestMappingOperations::new(),

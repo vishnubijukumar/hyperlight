@@ -178,22 +178,8 @@ impl From<&CommonRegisters> for kvm_regs {
     fn from(regs: &CommonRegisters) -> Self {
         kvm_regs {
             gprs: [
-                regs.rax,
-                regs.rbx,
-                regs.rcx,
-                regs.rdx,
-                regs.rsi,
-                regs.rdi,
-                regs.rsp,
-                regs.rbp,
-                regs.r8,
-                regs.r9,
-                regs.r10,
-                regs.r11,
-                regs.r12,
-                regs.r13,
-                regs.r14,
-                regs.r15,
+                regs.rax, regs.rbx, regs.rcx, regs.rdx, regs.rsi, regs.rdi, regs.rsp, regs.rbp,
+                regs.r8, regs.r9, regs.r10, regs.r11, regs.r12, regs.r13, regs.r14, regs.r15,
             ],
         }
     }

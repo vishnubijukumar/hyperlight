@@ -17,6 +17,8 @@ limitations under the License.
 // Hyperlight’s x86 guest uses I/O port OUT; s390x uses a `DIAG` with a private
 // function code that Linux KVM does not handle in-kernel, yielding
 // `KVM_EXIT_S390_SIEIC` to userspace (see `hyperlight-host` `kvm/s390x.rs`).
+// Instruction semantics: IBM z/Architecture Principles of Operation (SA22-7832), *Diagnose*;
+// https://publibfp.dhe.ibm.com/epubs/pdf/a227832d.pdf
 
 use core::arch::asm;
 

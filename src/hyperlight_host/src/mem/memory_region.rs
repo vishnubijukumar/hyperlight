@@ -464,10 +464,9 @@ impl From<&MemoryRegion> for kvm_bindings::kvm_userspace_memory_region {
         let flags: u32 = 0;
         #[cfg(not(target_arch = "s390x"))]
         let flags: u32 = {
-            let perm_flags = (MemoryRegionFlags::READ
-                | MemoryRegionFlags::WRITE
-                | MemoryRegionFlags::EXECUTE)
-                .intersection(region.flags);
+            let perm_flags =
+                (MemoryRegionFlags::READ | MemoryRegionFlags::WRITE | MemoryRegionFlags::EXECUTE)
+                    .intersection(region.flags);
             if perm_flags.contains(MemoryRegionFlags::WRITE) {
                 0 // RWX
             } else {
