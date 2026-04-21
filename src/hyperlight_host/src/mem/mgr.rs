@@ -36,7 +36,7 @@ use crate::mem::memory_region::MemoryRegion;
 #[cfg(crashdump)]
 use crate::mem::memory_region::{CrashDumpRegion, MemoryRegionFlags, MemoryRegionType};
 use crate::sandbox::snapshot::{NextAction, Snapshot};
-use crate::{Result, new_error};
+use crate::{HyperlightError, Result, new_error};
 
 #[cfg(all(feature = "crashdump", not(feature = "nanvix-unstable")))]
 fn mapping_kind_to_flags(kind: &MappingKind) -> (MemoryRegionFlags, MemoryRegionType) {
@@ -449,10 +449,104 @@ impl SandboxMemoryManager<HostSharedMemory> {
     /// A function call result can be either an error or a successful return value.
     #[instrument(err(Debug), skip_all, parent = Span::current(), level= "Trace")]
     pub(crate) fn get_guest_function_call_result(&mut self) -> Result<FunctionCallResult> {
-        self.scratch_mem.try_pop_buffer_into::<FunctionCallResult>(
-            self.layout.get_output_data_buffer_scratch_host_offset(),
-            self.layout.sandbox_memory_config.get_output_data_size(),
-        )
+        let out_off = self.layout.get_output_data_buffer_scratch_host_offset();
+        let out_sz = self.layout.sandbox_memory_config.get_output_data_size();
+        match self
+            .scratch_mem
+            .try_pop_buffer_into::<FunctionCallResult>(out_off, out_sz)
+        {
+            Ok(v) => Ok(v),
+            Err(e) => {
+                #[cfg(all(
+                    target_os = "linux",
+                    target_arch = "s390x",
+                    not(feature = "nanvix-unstable")
+                ))]
+                self.log_s390x_guest_output_pop_debug(out_off, out_sz, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// When popping the guest result fails, optionally log scratch + PEB I/O fields (s390x triage).
+    ///
+    /// Set **`HYPERLIGHT_S390X_IO_DEBUG=1`** and run tests with **`--nocapture`** to print the dump
+    /// to stderr.
+    #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    fn log_s390x_guest_output_pop_debug(
+        &self,
+        out_off: usize,
+        out_sz: usize,
+        err: &HyperlightError,
+    ) {
+        use core::fmt::Write;
+        use hyperlight_common::layout::scratch_base_gpa;
+
+        let mut msg = String::new();
+        let _ = writeln!(
+            &mut msg,
+            "get_guest_function_call_result failed: {err}; scratch_usable_len={} layout_scratch_size={} out_off={out_off} out_sz={out_sz}",
+            self.scratch_mem.mem_size(),
+            self.layout.get_scratch_size(),
+        );
+
+        let n = 64.min(out_sz);
+        let mut buf = vec![0u8; n];
+        if self.scratch_mem.copy_to_slice(&mut buf, out_off).is_ok() {
+            let _ = write!(&mut msg, "output_scratch[0..{n}] hex: ");
+            for b in &buf {
+                let _ = write!(&mut msg, "{b:02x} ");
+            }
+            let _ = writeln!(&mut msg);
+        }
+
+        let in_off = self.layout.get_input_data_buffer_scratch_host_offset();
+        let in_sz = self.layout.sandbox_memory_config.get_input_data_size();
+        let mut ib = [0u8; 8];
+        if self.scratch_mem.copy_to_slice(&mut ib[..], in_off).is_ok() {
+            let _ = writeln!(
+                &mut msg,
+                "input_scratch_sp_le={} (in_off={in_off} in_sz={in_sz})",
+                u64::from_le_bytes(ib),
+            );
+        }
+
+        let live = self.scratch_mem.mem_size();
+        let in_gpa = scratch_base_gpa(live);
+        let out_gpa = in_gpa.saturating_add(self.layout.sandbox_memory_config.get_input_data_size() as u64);
+        let _ = writeln!(
+            &mut msg,
+            "expected_io_ptrs_from_host_math: in_ptr={in_gpa:#x} out_ptr={out_gpa:#x}",
+        );
+
+        let (in_sz_off, in_ptr_off, out_sz_off, out_ptr_off) =
+            self.layout.snapshot_peb_io_stack_field_offsets();
+        let snap = self.shared_mem.as_slice();
+        let read_native_u64 = |off: usize| -> Option<u64> {
+            snap.get(off..off.checked_add(8)?)
+                .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                .map(u64::from_ne_bytes)
+        };
+        match (
+            read_native_u64(in_sz_off),
+            read_native_u64(in_ptr_off),
+            read_native_u64(out_sz_off),
+            read_native_u64(out_ptr_off),
+        ) {
+            (Some(isz), Some(iptr), Some(osz), Some(optr)) => {
+                let _ = writeln!(
+                    &mut msg,
+                    "PEB snapshot native u64: input_stack size={isz} ptr={iptr:#x}; output_stack size={osz} ptr={optr:#x}",
+                );
+            }
+            _ => {
+                let _ = writeln!(&mut msg, "PEB snapshot read failed at input/output stack offsets (slice_len={})", snap.len());
+            }
+        }
+
+        if std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG").is_some() {
+            eprintln!("{}", msg.trim_end());
+        }
     }
 
     /// Read guest log data from the `SharedMemory` contained within `self`

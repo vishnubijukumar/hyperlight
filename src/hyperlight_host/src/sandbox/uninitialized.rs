@@ -169,6 +169,12 @@ pub struct UninitializedSandbox {
     pub(crate) load_info: crate::mem::exe::LoadInfo,
     // This is needed to convey the stack pointer between the snapshot
     // and the HyperlightVm creation
+    /// On Linux KVM s390x, `evolve_impl_multi_use` ignores this field and recomputes the stack
+    /// top from the mapped scratch layout (`s390x_stack_top_from_layout` in `uninitialized_evolve.rs`).
+    #[cfg_attr(
+        all(target_arch = "s390x", not(feature = "nanvix-unstable")),
+        allow(dead_code)
+    )]
     pub(crate) stack_top_gva: u64,
     /// Populated by [`evolve()`](Self::evolve) with a [`HostSharedMemory`]
     /// view of scratch memory. Code that needs host-style volatile access

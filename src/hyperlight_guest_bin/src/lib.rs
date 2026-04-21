@@ -211,12 +211,20 @@ core::arch::global_asm!(
 /// Architecture-nonspecific initialisation: set up the heap,
 /// coordinate some addresses and configuration with the host, and run
 /// user initialisation
+// Fifth arg: live scratch size (`SandboxMemoryLayout::get_scratch_size`); amd64 passes 0;
+// Linux KVM s390x passes it in GR6 at guest entry.
 pub(crate) extern "C" fn generic_init(
     peb_address: u64,
     seed: u64,
     ops: u64,
     max_log_level: u64,
+    live_scratch_bytes: u64,
 ) -> u64 {
+    #[cfg(target_arch = "s390x")]
+    hyperlight_guest::layout::init_s390_live_scratch_from_host(live_scratch_bytes);
+    #[cfg(not(target_arch = "s390x"))]
+    let _ = live_scratch_bytes;
+
     unsafe {
         GUEST_HANDLE = GuestHandle::init(peb_address as *mut HyperlightPEB);
         #[allow(static_mut_refs)]

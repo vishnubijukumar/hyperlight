@@ -21,26 +21,44 @@ limitations under the License.
 // Stack bounds: same high virtual addresses as amd64/aarch64 placeholders so
 // host and guest agree on a 64-bit upper region until we define an s390x map.
 
+use core::sync::atomic::{AtomicU64, Ordering};
+
 /// Top of the guest main stack (virtual address).
 pub const MAIN_STACK_TOP_GVA: u64 = 0xffff_ff00_0000_0000;
 /// Lower limit of that stack’s growth region.
 pub const MAIN_STACK_LIMIT_GVA: u64 = 0xffff_fe00_0000_0000;
 
-/// Size of the scratch region (bytes), as stored by the host in guest memory.
+/// Live scratch span in bytes (matches `HostSharedMemory::mem_size` / KVM slot).
 ///
-/// The host writes this at a fixed offset below `MAX_GVA` (see
-/// `layout::scratch_size_gva`). We load one `u64` from that cell. Using
-/// `read_volatile` avoids the compiler caching or reordering the read, which
-/// matters if the host updates scratch metadata while the guest runs.
+/// Linux KVM s390x guests do not load the snapshot page tables: `scratch_size_gva`
+/// cannot use the amd64-style `MAX_GVA - offset` cell, which is not backed by the
+/// scratch memslot. The host passes the rounded size in **GR6** at guest entry
+/// (`HyperlightVm::initialise`); `hyperlight-guest-bin` records it here before any
+/// code reads scratch metadata or `scratch_base_gpa()`.
+static LIVE_SCRATCH_BYTES: AtomicU64 = AtomicU64::new(0);
+
+/// Called from `hyperlight-guest-bin` `generic_init` before other guest setup.
+#[inline]
+pub fn init_live_scratch_from_host(bytes: u64) {
+    LIVE_SCRATCH_BYTES.store(bytes, Ordering::Relaxed);
+}
+
+/// Size of the scratch region (bytes), as agreed with the host for this sandbox.
+#[inline]
 pub fn scratch_size() -> u64 {
-    let addr = crate::layout::scratch_size_gva();
-    unsafe { addr.cast::<u64>().read_volatile() }
+    LIVE_SCRATCH_BYTES.load(Ordering::Relaxed)
 }
 
 pub fn scratch_base_gpa() -> u64 {
-    hyperlight_common::layout::scratch_base_gpa(scratch_size() as usize)
+    let sz = scratch_size();
+    if sz == 0 {
+        return 0;
+    }
+    hyperlight_common::layout::scratch_base_gpa(sz as usize)
 }
 
+/// Linux KVM s390x bring-up uses identity guest addresses for scratch (GVA == GPA).
+#[inline]
 pub fn scratch_base_gva() -> u64 {
-    hyperlight_common::layout::scratch_base_gva(scratch_size() as usize)
+    scratch_base_gpa()
 }

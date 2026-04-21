@@ -223,6 +223,8 @@ impl HyperlightVm {
             rsi: seed,
             rdx: page_size.into(),
             rcx: get_guest_log_filter(guest_max_log_level),
+            // Fifth argument to `generic_init` (amd64 SysV uses R8); must be zero on x86_64.
+            r8: 0,
             rflags: 1 << 1,
 
             ..Default::default()

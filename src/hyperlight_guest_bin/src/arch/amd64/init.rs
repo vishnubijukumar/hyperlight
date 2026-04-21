@@ -171,6 +171,7 @@ core::arch::global_asm!("
     .cfi_startproc\n
     .cfi_undefined rip\n
     mov rsp, r8\n
+    xor r8, r8\n
     xor ebp, ebp\n
     call {generic_init}\n
     mov dx, {halt_port}\n

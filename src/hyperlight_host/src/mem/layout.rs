@@ -436,6 +436,26 @@ impl SandboxMemoryLayout {
         self.scratch_size
     }
 
+    /// Byte offsets into the snapshot image for each `GuestMemoryRegion` `{ size, ptr }` pair.
+    ///
+    /// Used for s390x bring-up diagnostics when host scratch I/O does not match the PEB.
+    #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn snapshot_peb_io_stack_field_offsets(
+        &self,
+    ) -> (
+        usize,
+        usize,
+        usize,
+        usize,
+    ) {
+        (
+            self.peb_input_data_offset,
+            self.peb_input_data_offset + size_of::<u64>(),
+            self.peb_output_data_offset,
+            self.peb_output_data_offset + size_of::<u64>(),
+        )
+    }
+
     /// Get the offset in guest memory to the output data pointer.
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     fn get_output_data_pointer_offset(&self) -> usize {

@@ -35,6 +35,29 @@ use crate::sandbox::trace::MemTraceInfo;
 use crate::signal_handlers::setup_signal_handlers;
 use crate::{MultiUseSandbox, Result, UninitializedSandbox};
 
+/// Linux KVM s390x runs the guest with DAT cleared; `r15` must point at **guest-real** storage
+/// that is actually mapped. The snapshot still records an amd64-style `stack_top_gva` near
+/// [`hyperlight_common::layout::MAX_GVA`], which is outside the KVM memslots.
+///
+/// Place the initial stack a few pages below the **top** of the scratch GPA window so (a) the
+/// value is 8-byte aligned (required by [`InitializeError::InvalidStackPointer`]) and (b) the
+/// descending stack does not immediately overwrite the scratch bookkeeping cells in the last
+/// 32 bytes (`SCRATCH_TOP_*` offsets), unlike the amd64 path which pivots to a dedicated stack page.
+#[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+fn s390x_stack_top_from_layout(layout: &crate::mem::layout::SandboxMemoryLayout) -> u64 {
+    let sz = layout.get_scratch_size() as u64;
+    let base = hyperlight_common::layout::scratch_base_gpa(sz as usize);
+    // Reserve headroom below scratch metadata at the end of the region.
+    const MARGIN: u64 = 8 * hyperlight_common::vmem::PAGE_SIZE as u64;
+    let high = (base + sz.saturating_sub(MARGIN)) & !7;
+    let pt_end = layout.get_pt_base_scratch_offset() + layout.get_pt_size();
+    let low = (base + (pt_end as u64).saturating_add(MARGIN)) & !7;
+    // Prefer the high end of scratch (most stack space); never pick `max(low, high)` when
+    // `low > high` — that can point past the scratch window for pathological PT sizing.
+    let top = if high >= low { high } else { low };
+    top & !7
+}
+
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
 pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<MultiUseSandbox> {
     let (mut hshm, gshm) = u_sbox.mgr.build()?;
@@ -58,10 +81,21 @@ pub(super) fn evolve_impl_multi_use(u_sbox: UninitializedSandbox) -> Result<Mult
     // for host-side alignment calculations in set_up_hypervisor_partition.
     let page_size = u32::try_from(page_size::get())?;
 
+    let stack_top_gva = {
+        #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+        {
+            s390x_stack_top_from_layout(&hshm.layout)
+        }
+        #[cfg(not(all(target_arch = "s390x", not(feature = "nanvix-unstable"))))]
+        {
+            u_sbox.stack_top_gva
+        }
+    };
+
     let mut vm = set_up_hypervisor_partition(
         gshm,
         &u_sbox.config,
-        u_sbox.stack_top_gva,
+        stack_top_gva,
         page_size as usize,
         #[cfg(any(crashdump, gdb))]
         u_sbox.rt_cfg,

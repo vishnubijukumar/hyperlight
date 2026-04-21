@@ -71,9 +71,16 @@ pub mod dispatch {
 /// (`inlateout("r2")`); a plain Rust call to [`s390x_guest_vm_halt`] can let LLVM spill the return
 /// of `generic_init` before the hypercall.
 #[unsafe(no_mangle)]
-pub extern "C" fn entrypoint(peb_address: u64, seed: u64, ops: u64, max_log_level: u64) -> ! {
+pub extern "C" fn entrypoint(
+    peb_address: u64,
+    seed: u64,
+    ops: u64,
+    max_log_level: u64,
+    live_scratch_bytes: u64,
+) -> ! {
     // `inlateout("r2")` requires `mut`: the operand is written back by the assembler.
-    let mut dispatch = crate::generic_init(peb_address, seed, ops, max_log_level);
+    let mut dispatch =
+        crate::generic_init(peb_address, seed, ops, max_log_level, live_scratch_bytes);
     unsafe {
         core::arch::asm!(
             "diag %r4, %r5, {fc}",

@@ -262,6 +262,10 @@ impl HyperlightVm {
             rdx: seed,
             rsi: page_size.into(),
             rdi: super::get_guest_log_filter(guest_max_log_level),
+            // `CommonRegisters::rsp` maps to KVM GPR6. The s390x entry ABI passes a fifth
+            // argument to `entrypoint` / `generic_init` in GR6: live scratch size in bytes
+            // (must match `SandboxMemoryLayout::get_scratch_size` and the scratch memslot).
+            rsp: mem_mgr.layout.get_scratch_size() as u64,
             // Non-zero PSW mask: `KvmVm::set_regs` only replaces the shadow mask when `rflags` is
             // set; use the same EA|BA runnable default as dispatch (DAT cleared in the KVM layer).
             rflags: S390_DEFAULT_PSW_MASK,
