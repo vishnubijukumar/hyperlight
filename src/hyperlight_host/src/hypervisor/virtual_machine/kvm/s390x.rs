@@ -79,6 +79,22 @@ const S390_INSN_DIAG_OPCODE: u8 = 0x83;
 /// Length of `DIAG` on z/Architecture (no execute prefix).
 const S390_DIAG_INSN_LEN: u64 = 4;
 
+/// Some KVM / SIE paths expose the faulting halfword in **big-endian** wire order (`0x83XY`);
+/// others surface the same two bytes as a native `u16` in **little-endian** storage order
+/// (`0xXY83`). Normalize to the former so RS register fields decode consistently.
+#[inline]
+fn normalize_s390_diag_ipa(ipa: u16) -> Option<u16> {
+    let hi = (ipa >> 8) as u8;
+    let lo = ipa as u8;
+    if hi == S390_INSN_DIAG_OPCODE {
+        Some(ipa)
+    } else if lo == S390_INSN_DIAG_OPCODE {
+        Some(ipa.swap_bytes())
+    } else {
+        None
+    }
+}
+
 /// `KVMIO` / ioctl numbers from Linux `include/uapi/linux/kvm.h` (same layout as other architectures).
 const KVMIO_IOCTL_TYPE: u32 = 0xAE;
 vmm_sys_util::ioctl_io_nr!(KVM_S390_INITIAL_RESET, KVMIO_IOCTL_TYPE, 0x97);
@@ -104,9 +120,7 @@ fn decode_s390_hyperlight_diag_io(
     if icptcode != ICPT_INSTRUCTION && icptcode != ICPT_INSTRUCTION_PROGI {
         return None;
     }
-    if (ipa >> 8) as u8 != S390_INSN_DIAG_OPCODE {
-        return None;
-    }
+    let ipa = normalize_s390_diag_ipa(ipa)?;
     let base2 = ipb >> 28;
     let disp2 = (ipb & 0x0fff_0000) >> 16;
     let op2_addr = (if base2 == 0 {
@@ -541,6 +555,38 @@ mod hyperlight_diag_decode_tests {
         gprs[5] = 0;
         let (port, payload) =
             decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).unwrap();
+        assert_eq!(port, VmAction::Halt as u16);
+        assert_eq!(payload, 0u32.to_le_bytes().to_vec());
+    }
+
+    /// Little-endian load of halfword bytes `83 23` (DIAG r2,r3) → `0x2383`.
+    #[test]
+    fn decode_accepts_diag_ipa_le_storage_halfword() {
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let ipa_le = 0x2383u16;
+        let mut gprs = [0u64; 16];
+        gprs[2] = 101;
+        gprs[3] = 0xdeadbeef;
+        let (port, payload) =
+            decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa_le, ipb, &gprs).unwrap();
+        assert_eq!(port, 101);
+        assert_eq!(payload, (gprs[3] as u32).to_le_bytes().to_vec());
+    }
+
+    /// LE halfword for bytes `83 45` (DIAG r4,r5), e.g. guest halt.
+    #[test]
+    fn decode_vm_halt_diag_le_storage_halfword() {
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let ipa_le = 0x4583u16;
+        let mut gprs = [0u64; 16];
+        gprs[4] = u64::from(VmAction::Halt as u16);
+        gprs[5] = 0;
+        let (port, payload) =
+            decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa_le, ipb, &gprs).unwrap();
         assert_eq!(port, VmAction::Halt as u16);
         assert_eq!(payload, 0u32.to_le_bytes().to_vec());
     }
