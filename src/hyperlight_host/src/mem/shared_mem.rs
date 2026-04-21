@@ -1018,7 +1018,18 @@ pub trait SharedMemory {
             // TODO: Compare & add heuristic thresholds: mmap, MADV_DONTNEED, MADV_REMOVE, MADV_FREE (?)
             // TODO: Find a similar lazy zeroing approach that works on MSHV.
             //       (See Note [Keeping mappings in sync between userspace and the guest])
-            #[cfg(all(target_os = "linux", feature = "kvm", not(any(feature = "mshv3"))))]
+            //
+            // On Linux KVM s390x, scratch pages are registered with `KVM_SET_USER_MEMORY_REGION`.
+            // `madvise(MADV_DONTNEED)` on the host mapping can leave the guest memslot observing
+            // stale physical pages while the host faults in new zero pages — host IPC writes then
+            // diverge from what the guest loads (e.g. input stack cursor unchanged at 8). Always
+            // zero the guest-usable span with ordinary stores here.
+            #[cfg(all(
+                target_os = "linux",
+                feature = "kvm",
+                not(any(feature = "mshv3")),
+                not(target_arch = "s390x")
+            ))]
             unsafe {
                 let ret = libc::madvise(
                     e.region.ptr as *mut libc::c_void,

@@ -568,10 +568,13 @@ fn outb_with_port(port: u32, value: u32) {
         use hyperlight_common::outb::S390X_HYPERLIGHT_DIAG_IO;
         let p = port as u64;
         let v = value as u64;
+        // Pin `%r2`/`%r3` like `hyperlight_guest::arch::s390x::exit::out32`. `in(reg)` lets LLVM
+        // pick arbitrary registers; the host KVM decoder must match `ipa` RS fields — fixed regs
+        // avoid fragile decode and match the rest of the Hyperlight s390x ABI.
         core::arch::asm!(
-            "diag {p},{v},{fc}",
-            p = in(reg) p,
-            v = in(reg) v,
+            "diag %r2, %r3, {fc}",
+            in("r2") p,
+            in("r3") v,
             fc = const S390X_HYPERLIGHT_DIAG_IO,
             options(nostack),
         );

@@ -69,14 +69,29 @@ use crate::sandbox::uninitialized::SandboxRuntimeConfig;
 
 /// Condition-code field in the PSW mask (`PSW_MASK_CC` in Linux `arch/s390/include/uapi/asm/ptrace.h`).
 const PSW_MASK_CC: u64 = 0x0000_3000_0000_0000;
+/// `PSW_MASK_DAT` from Linux `arch/s390/include/uapi/asm/ptrace.h` (see `kvm/s390x.rs`).
+const PSW_MASK_DAT: u64 = 0x0400_0000_0000_0000;
+/// `PSW_MASK_PSTATE` — problem state; if set, privileged instructions trap (see `kvm/s390x.rs`).
+const PSW_MASK_PSTATE: u64 = 0x0001_0000_0000_0000;
 /// Default runnable-guest PSW mask; must stay in sync with `kvm/s390x.rs` `DEFAULT_S390_PSW_MASK`.
 const S390_DEFAULT_PSW_MASK: u64 = 0x0000_0001_8000_0000;
+
+/// Match `kvm/s390x::psw_mask_hyperlight`: never run the guest dispatch PSW with DAT or PSTATE set.
+#[inline]
+fn s390_psw_mask_strip_dat_pstate(mask: u64) -> u64 {
+    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE
+}
 
 #[inline]
 fn s390_psw_mask_for_dispatch(base_mask: u64, pending_tlb_flush: bool) -> u64 {
     // x86 uses ZF=1 to request a flush before dispatch; on s390x we use PSW CC=3 (non-zero).
+    let base = s390_psw_mask_strip_dat_pstate(if base_mask == 0 {
+        S390_DEFAULT_PSW_MASK
+    } else {
+        base_mask
+    });
     let cc: u64 = if pending_tlb_flush { 3 } else { 0 };
-    (base_mask & !PSW_MASK_CC) | (cc << 44)
+    (base & !PSW_MASK_CC) | (cc << 44)
 }
 
 impl HyperlightVm {
@@ -332,16 +347,22 @@ impl HyperlightVm {
         };
         let rflags = s390_psw_mask_for_dispatch(base_psw_mask, self.pending_tlb_flush);
 
-        // Keep the full GPR file from the last guest-visible state (e.g. after `generic_init` or
-        // a prior halt). Zeroing the rest broke Linux/s390x guests: the ELF ABI uses r12 (TOC) and
-        // other callee-saved registers across calls; `KvmVm::regs()` already merges
-        // `kvm_run.s.regs` when `KVM_SYNC_GPRS` is set.
-        let regs = CommonRegisters {
-            rip: dispatch_func_addr,
-            r15: self.rsp_gva,
-            rflags,
-            ..r_current
-        };
+        // `CommonRegisters` maps to KVM `gprs[0..15]` in field order — that is **s390x GPR0..GPR15**
+        // (see `hypervisor/regs/s390x/mod.rs`), not x86 register semantics.
+        //
+        // Guest entry put `generic_init` leftovers in GPR2..GPR5 only (`rcx`..`rdi` here). We must
+        // clear those before `dispatch_function` / `internal_dispatch_function` (no args), but
+        // **must not** zero `rsp` / `rbp` / `r8`..`r11`: those slots are **GPR6..GPR11**, which are
+        // **callee-saved** on Linux s390x. The previous `rsp: 0` + `..Default::default()` cleared
+        // GPR6..GPR11 and broke the guest Rust runtime so scratch output never advanced.
+        let mut regs = r_current;
+        regs.rip = dispatch_func_addr;
+        regs.r15 = self.rsp_gva;
+        regs.rflags = rflags;
+        regs.rcx = 0;
+        regs.rdx = 0;
+        regs.rsi = 0;
+        regs.rdi = 0;
         self.vm
             .set_regs(&regs)
             .map_err(DispatchGuestCallError::SetupRegs)?;
@@ -380,7 +401,13 @@ impl HyperlightVm {
         {
             let mut sregs = *sregs;
             sregs.cr3 = cr3;
-            self.pending_tlb_flush = true;
+            // `VirtualMachine::set_sregs` is a no-op on Linux KVM s390x: there is no CR3 reload.
+            // `pending_tlb_flush` exists so the *next* amd64 dispatch sets RFLAGS.ZF and the guest
+            // runs a TLB-flush prelude. On s390x the host maps that intent to PSW CC=3
+            // (`s390_psw_mask_for_dispatch`), but the guest dispatch stub omits `PTLB` (see
+            // `hyperlight_guest_bin` s390x `mod.rs`). Setting `pending_tlb_flush` here would only
+            // force CC=3 on the next dispatch with no guest-side handler — leave CC cleared.
+            self.pending_tlb_flush = false;
             self.vm.set_sregs(&sregs)?;
         }
         #[cfg(feature = "nanvix-unstable")]

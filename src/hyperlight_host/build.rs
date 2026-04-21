@@ -107,8 +107,17 @@ fn main() -> Result<()> {
         print_debug: { all(feature = "print_debug", debug_assertions) },
         // the nanvix-unstable and gdb features both (only
         // temporarily!) need to use writable/un-shared snapshot
-        // memories, and so can't share
-        unshared_snapshot_mem: { any(feature = "nanvix-unstable", feature = "gdb") },
+        // memories, and so can't share.
+        //
+        // Linux KVM on s390x: multiple sandboxes built from the same `Arc<Snapshot>` must not
+        // share one `ReadonlySharedMemory` mmap — the first guest can dirty pages through its
+        // memslots; a second VM reusing the same host mapping observes corrupt code/data (e.g.
+        // bogus `DIAG` operands and `Invalid OutBAction` ports).
+        unshared_snapshot_mem: { any(
+            feature = "nanvix-unstable",
+            feature = "gdb",
+            target_arch = "s390x"
+        ) },
     }
 
     #[cfg(feature = "build-metadata")]

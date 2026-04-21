@@ -64,12 +64,31 @@ pub mod dispatch {
     }
 }
 
+/// First halt after init: host reads **`%r2`** for `NextAction::Call` (dispatch entry).
+///
+/// `dispatch` is the **first** parameter with **`extern "C"`** so it is in **`%r2`** per the
+/// s390x ELF ABI (same as the Linux kernel / KVM guest entry convention). A plain Rust `fn`
+/// sibling could use a different convention on some targets; do not rely on it.
+#[unsafe(no_mangle)]
+extern "C" fn s390x_halt_after_init_dispatch_in_r2(dispatch: u64) -> ! {
+    unsafe {
+        core::arch::asm!(
+            "diag %r4, %r5, {fc}",
+            in("r4") VmAction::Halt as u64,
+            in("r5") 0u64,
+            in("r2") dispatch,
+            fc = const S390X_HYPERLIGHT_DIAG_IO,
+            options(nostack),
+        );
+        loop {
+            core::hint::spin_loop();
+        }
+    }
+}
+
 /// Guest entry — same parameters as amd64 (`PEB`, RNG seed, guest page size, log filter).
 ///
 /// The host reads **`GR2`** after the first halt to set `NextAction::Call` to the dispatch entry.
-/// Keep that value live in **`GR2`** across the halt `DIAG` by constraining it in **`asm!`**
-/// (`inlateout("r2")`); a plain Rust call to [`s390x_guest_vm_halt`] can let LLVM spill the return
-/// of `generic_init` before the hypercall.
 #[unsafe(no_mangle)]
 pub extern "C" fn entrypoint(
     peb_address: u64,
@@ -78,20 +97,7 @@ pub extern "C" fn entrypoint(
     max_log_level: u64,
     live_scratch_bytes: u64,
 ) -> ! {
-    // `inlateout("r2")` requires `mut`: the operand is written back by the assembler.
-    let mut dispatch =
+    let dispatch =
         crate::generic_init(peb_address, seed, ops, max_log_level, live_scratch_bytes);
-    unsafe {
-        core::arch::asm!(
-            "diag %r4, %r5, {fc}",
-            in("r4") VmAction::Halt as u64,
-            in("r5") 0u64,
-            inlateout("r2") dispatch,
-            fc = const S390X_HYPERLIGHT_DIAG_IO,
-            options(nostack),
-        );
-        loop {
-            core::hint::spin_loop();
-        }
-    }
+    s390x_halt_after_init_dispatch_in_r2(dispatch);
 }

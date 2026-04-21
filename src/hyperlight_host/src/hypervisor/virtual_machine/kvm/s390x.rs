@@ -102,8 +102,7 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 
 /// If `run` describes our Hyperlight `DIAG` `out32`, returns `(port, IoOut payload)` for the
 /// common `handle_io` path. `ipa`/`ipb` layout follows the SIE interception parameters for
-/// the faulting `DIAG` (see Linux `arch/s390/kvm`). The guest pins operands to **`r2`/`r3`**
-/// (`hyperlight_guest::arch::s390x::exit::out32`) so `ipa` and the GPR file stay consistent.
+/// the faulting `DIAG` (see Linux `arch/s390/kvm`). Operand GPRs are resolved as described below.
 ///
 /// KVM `DIAG` uses RS-a format; the diagnose **function code** is the low 16 bits of the
 /// second-operand address, computed exactly like Linux `kvm_s390_get_base_disp_rs` in
@@ -111,6 +110,14 @@ vmm_sys_util::ioctl_io_nr!(KVM_CREATE_IRQCHIP_IOCTL, KVMIO_IOCTL_TYPE, 0x60);
 /// raw `ipb` halfwords did not match the kernel and could mis-classify intercepts.
 /// Instruction layout and operand addressing follow IBM *z/Architecture Principles of Operation*
 /// (SA22-7832), *Diagnose*; see <https://publibfp.dhe.ibm.com/epubs/pdf/a227832d.pdf>.
+///
+/// Operand registers are fixed for Hyperlight’s two `DIAG` encodings (RS second byte):
+/// - **`0x45`**: `DIAG %r4,%r5` — VM halt (`hyperlight_guest_bin`, `simpleguest`).
+/// - **`0x23`**: `DIAG %r2,%r3` — `hyperlight_guest::arch::s390x::exit::out32` and `simpleguest`
+///   `OutbWithPort` (both pin `%r2`/`%r3`).
+///
+/// Any other second-byte value with diagnose FC `0x3E8` is **not** treated as Hyperlight I/O
+/// (e.g. unrelated `DIAG` encodings or intercept noise).
 fn decode_s390_hyperlight_diag_io(
     icptcode: u8,
     ipa: u16,
@@ -133,10 +140,12 @@ fn decode_s390_hyperlight_diag_io(
     if fc != S390X_HYPERLIGHT_DIAG_IO {
         return None;
     }
-    let r1 = ((ipa >> 4) & 0xF) as usize;
-    let r3 = (ipa & 0xF) as usize;
-    let port = gprs[r1] as u16;
-    let val = gprs[r3] as u32;
+    let insn_lo = (ipa & 0xff) as u8;
+    let (port, val) = match insn_lo {
+        0x45 => (gprs[4] as u16, gprs[5] as u32),
+        0x23 => (gprs[2] as u16, gprs[3] as u32),
+        _ => return None,
+    };
     Some((port, val.to_le_bytes().to_vec()))
 }
 
@@ -246,6 +255,15 @@ impl KvmVm {
                 .into(),
             ));
         }
+
+        // `KVM_S390_INITIAL_RESET` does not always clear `kvm_run.s.regs.gprs` to a deterministic
+        // view before the first `KVM_SET_REGS` from Hyperlight. Stale GPR values have been
+        // observed to survive into the first `KVM_EXIT_S390_SIEIC` decode on some bring-up paths
+        // (e.g. bogus `OutBAction` ports from `%r2` while the guest never executed a Hyperlight
+        // `DIAG`). Flush the GPR file explicitly.
+        vcpu_fd
+            .set_regs(&kvm_regs { gprs: [0u64; 16] })
+            .map_err(|e| CreateVmError::CreateVcpuFd(e.into()))?;
 
         let (init_addr, init_mask) = {
             let run = vcpu_fd.get_kvm_run();
@@ -414,21 +432,22 @@ impl VirtualMachine for KvmVm {
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
         let mut vcpu = self.vcpu_fd.lock().unwrap();
-        let mut kvm_regs = vcpu
+        // Use `KVM_GET_REGS` as the single source of truth for the architectural GPR file when
+        // handing state to higher layers (`dispatch_call_from_host`, `initialise`, etc.).
+        //
+        // Do **not** replace `kvm_regs.gprs` with `kvm_run.s.regs.gprs` whenever `KVM_SYNC_GPRS` is
+        // set: on some exits that bit can be set even though `s.regs` only reliably carries the
+        // operands the kernel decoded for the last intercept. Treating it as a full 16-register
+        // snapshot has been observed to clobber callee-saved registers (notably `%r12` / TOC) versus
+        // `KVM_GET_REGS`, so the guest resumes with a broken data model and never publishes results
+        // to the scratch output buffer (host still sees stack pointer `8`).
+        //
+        // `KVM_EXIT_S390_SIEIC` **decode** paths use `gpr_file_for_s390_sie_decode`, which still
+        // prefers `run.s.regs` when advertised, matching `kvm_s390_handle_diag` / instruction
+        // intercept semantics without polluting the general-purpose `regs()` view.
+        let kvm_regs = vcpu
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;
-        // After `KVM_EXIT_S390_SIEIC`, GPRs for the faulting instruction are often published in
-        // `kvm_run.s.regs` when `kvm_valid_regs` includes `KVM_SYNC_GPRS`; `KVM_GET_REGS` alone can
-        // leave stale values. Hyperlight needs the real file (e.g. TOC / callee-saved GPRs) when
-        // re-entering the guest for `dispatch_function`.
-        let valid = {
-            let run = vcpu.get_kvm_run();
-            run.kvm_valid_regs
-        };
-        if valid & u64::from(KVM_SYNC_GPRS) != 0 {
-            let run = vcpu.get_kvm_run();
-            kvm_regs.gprs = unsafe { run.s.regs }.gprs;
-        }
         let mut r = CommonRegisters::from(&kvm_regs);
         let (addr, mask) = *self.shadow_psw.lock().unwrap();
         r.rip = addr;
@@ -596,6 +615,18 @@ mod hyperlight_diag_decode_tests {
         let ipb = 0x03e7_0000u32; // disp2 = 0x3e7 → fc != 0x3e8
         let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (2 << 4) | 3]);
         let gprs = [0u64; 16];
+        assert!(decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).is_none());
+    }
+
+    #[test]
+    fn decode_rejects_diag_fc_match_with_non_hyperlight_rs_encoding() {
+        let base2 = 0u32;
+        let disp2 = 0x3e8u32;
+        let ipb = (base2 << 28) | (disp2 << 16);
+        let ipa = u16::from_be_bytes([S390_INSN_DIAG_OPCODE, (6 << 4) | 7]);
+        let mut gprs = [0u64; 16];
+        gprs[6] = 999;
+        gprs[7] = 0x11223344;
         assert!(decode_s390_hyperlight_diag_io(ICPT_INSTRUCTION, ipa, ipb, &gprs).is_none());
     }
 }

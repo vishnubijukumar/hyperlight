@@ -521,11 +521,20 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
         let (in_sz_off, in_ptr_off, out_sz_off, out_ptr_off) =
             self.layout.snapshot_peb_io_stack_field_offsets();
-        let snap = self.shared_mem.as_slice();
         let read_native_u64 = |off: usize| -> Option<u64> {
-            snap.get(off..off.checked_add(8)?)
-                .and_then(|s| <[u8; 8]>::try_from(s).ok())
-                .map(u64::from_ne_bytes)
+            #[cfg(not(unshared_snapshot_mem))]
+            {
+                let snap = self.shared_mem.as_slice();
+                snap.get(off..off.checked_add(8)?)
+                    .and_then(|s| <[u8; 8]>::try_from(s).ok())
+                    .map(u64::from_ne_bytes)
+            }
+            #[cfg(unshared_snapshot_mem)]
+            {
+                let mut b = [0u8; 8];
+                self.shared_mem.copy_to_slice(&mut b, off).ok()?;
+                Some(u64::from_ne_bytes(b))
+            }
         };
         match (
             read_native_u64(in_sz_off),
@@ -540,7 +549,11 @@ impl SandboxMemoryManager<HostSharedMemory> {
                 );
             }
             _ => {
-                let _ = writeln!(&mut msg, "PEB snapshot read failed at input/output stack offsets (slice_len={})", snap.len());
+                let _ = writeln!(
+                    &mut msg,
+                    "PEB snapshot read failed at input/output stack offsets (snapshot_mem_len={})",
+                    self.shared_mem.mem_size(),
+                );
             }
         }
 
