@@ -1502,6 +1502,8 @@ mod tests {
             ro_mem.to_mgr_snapshot_mem().unwrap(),
             scratch_mem,
             NextAction::Initialise(layout.get_guest_code_address() as u64),
+            None,
+            None,
         );
 
         let (mut hshm, gshm) = mem_mgr.build().unwrap();

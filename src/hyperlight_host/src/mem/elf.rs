@@ -187,6 +187,37 @@ impl ElfInfo {
         self.guest_bin_version.as_deref()
     }
 
+    /// SVMA (ELF virtual address) of the `dispatch_function` symbol in the static symbol table,
+    /// when present. Used on Linux s390x to derive the guest dispatch entry GPA independently of
+    /// GR2 after the init halt (KVM has been observed to report a bogus value there while the
+    /// loaded image and GOT are correct).
+    pub(crate) fn dispatch_function_svma(&self) -> Option<u64> {
+        let elf = Elf::parse(&self.payload).ok()?;
+        elf.syms.iter().filter(|s| s.st_name != 0).find_map(|s| {
+            (elf.strtab.get_at(s.st_name) == Some("dispatch_function")).then_some(s.st_value)
+        })
+    }
+
+    /// SVMA of `_GLOBAL_OFFSET_TABLE_` when present in the static or dynamic symbol table.
+    ///
+    /// On Linux s390x the compiler keeps the GOT pointer in **GPR12** across calls; the host must
+    /// restore it when entering `dispatch_function` if KVM does not preserve it across the init
+    /// halt exit (same class of issue as bogus GR2 after `KVM_EXIT_S390_SIEIC`).
+    pub(crate) fn global_offset_table_svma(&self) -> Option<u64> {
+        let elf = Elf::parse(&self.payload).ok()?;
+        for s in elf.syms.iter().filter(|s| s.st_name != 0) {
+            if elf.strtab.get_at(s.st_name) == Some("_GLOBAL_OFFSET_TABLE_") {
+                return Some(s.st_value);
+            }
+        }
+        for s in elf.dynsyms.iter().filter(|s| s.st_name != 0) {
+            if elf.dynstrtab.get_at(s.st_name) == Some("_GLOBAL_OFFSET_TABLE_") {
+                return Some(s.st_value);
+            }
+        }
+        None
+    }
+
     pub(crate) fn get_base_va(&self) -> u64 {
         #[allow(clippy::unwrap_used)] // guaranteed not to panic because of the check in new()
         let min_phdr = self
@@ -300,5 +331,87 @@ impl ElfInfo {
                 Ok(LoadInfo {})
             }
         }
+    }
+}
+
+#[cfg(all(test, target_arch = "s390x"))]
+mod s390x_reloc_tests {
+    use goblin::elf::Elf;
+
+    use super::ElfInfo;
+    use crate::mem::layout::SandboxMemoryLayout;
+
+    /// `generic_init` returns the address loaded from the GOT (`lgrl %r2,…`); it must match
+    /// `load_addr + addend` for every `R_390_RELATIVE` slot that targets `dispatch_function`.
+    #[test]
+    fn simpleguest_dispatch_got_slots_use_load_base() {
+        const R_390_RELATIVE: u32 = 12;
+
+        let path =
+            hyperlight_testing::simple_guest_as_string().expect("locate simpleguest binary");
+        let bytes = std::fs::read(&path).expect("read simpleguest");
+        let elf = Elf::parse(&bytes).expect("parse ELF");
+
+        let dispatch_svma = elf
+            .syms
+            .iter()
+            .filter(|s| s.st_name != 0)
+            .find_map(|s| {
+                (elf.strtab.get_at(s.st_name) == Some("dispatch_function")).then_some(s.st_value)
+            })
+            .expect("dispatch_function symbol in symtab");
+
+        let info = ElfInfo::new(&bytes).expect("ElfInfo::new");
+        let load_addr = SandboxMemoryLayout::BASE_ADDRESS;
+        let mut mem = vec![0u8; info.get_va_size()];
+        info.load_at(load_addr, &mut mem).expect("load_at");
+
+        let mut matched = 0usize;
+        for r in elf.dynrelas.iter() {
+            if r.r_type != R_390_RELATIVE {
+                continue;
+            }
+            let Some(addend) = r.r_addend else {
+                continue;
+            };
+            if addend != dispatch_svma as i64 {
+                continue;
+            }
+            let o = r.r_offset as usize;
+            let word = u64::from_be_bytes(mem[o..o + 8].try_into().expect("GOT word in range"));
+            assert_eq!(
+                word,
+                load_addr as u64 + addend as u64,
+                "R_390_RELATIVE at {o:#x}: GOT must hold load_addr + addend (BE)"
+            );
+            matched += 1;
+        }
+        assert!(
+            matched > 0,
+            "expected at least one R_390_RELATIVE GOT slot for dispatch_function (addend={dispatch_svma:#x})"
+        );
+    }
+
+    #[test]
+    fn simpleguest_global_offset_table_sym_matches_symtab() {
+        let path =
+            hyperlight_testing::simple_guest_as_string().expect("locate simpleguest binary");
+        let bytes = std::fs::read(&path).expect("read simpleguest");
+        let elf = Elf::parse(&bytes).expect("parse ELF");
+        let got_svma = elf
+            .syms
+            .iter()
+            .filter(|s| s.st_name != 0)
+            .find_map(|s| {
+                (elf.strtab.get_at(s.st_name) == Some("_GLOBAL_OFFSET_TABLE_")).then_some(s.st_value)
+            })
+            .expect("_GLOBAL_OFFSET_TABLE_ in symtab");
+
+        let info = ElfInfo::new(&bytes).expect("ElfInfo::new");
+        assert_eq!(
+            info.global_offset_table_svma(),
+            Some(got_svma),
+            "ElfInfo must resolve GOT the same as goblin symtab"
+        );
     }
 }

@@ -19,7 +19,7 @@ use std::sync::Mutex;
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 use kvm_bindings::{
-    KVM_CAP_S390_IRQCHIP, KVM_SYNC_GPRS, kvm_enable_cap, kvm_regs, kvm_userspace_memory_region,
+    KVM_CAP_S390_IRQCHIP, kvm_enable_cap, kvm_regs, kvm_userspace_memory_region,
 };
 use kvm_ioctls::Cap::UserMemory;
 use kvm_ioctls::{Error as KvmErrno, Kvm, VcpuExit, VcpuFd, VmFd};
@@ -151,20 +151,14 @@ fn decode_s390_hyperlight_diag_io(
 
 /// GPRs for SIE instruction intercept decoding.
 ///
-/// Linux `kvm_s390_get_base_disp_rs` (and in-kernel `kvm_s390_handle_diag`) uses
-/// `vcpu->run->s.regs.gprs`. Prefer that view when `kvm_valid_regs` advertises `KVM_SYNC_GPRS`;
-/// otherwise fall back to `KVM_GET_REGS` so operand decode matches the faulting instruction.
+/// Linux `kvm_s390_get_base_disp_rs` (and in-kernel `kvm_s390_handle_diag`) consults
+/// `vcpu->run->s.regs.gprs`, but on some KVM / `KVM_EXIT_S390_SIEIC` paths `kvm_valid_regs` can
+/// still advertise `KVM_SYNC_GPRS` while that embedded GPR file does **not** match the faulting
+/// `DIAG` operands (stale or partially updated). Mis-decoding `%r2`/`%r3` yields bogus ports /
+/// payloads, wrong `OutBAction` handling, and an untouched guest output stack (`SP == 8`).
+/// Always use `KVM_GET_REGS`, which has matched bring-up hardware for Hyperlight I/O decode.
 fn gpr_file_for_s390_sie_decode(vcpu: &mut VcpuFd) -> std::result::Result<[u64; 16], KvmErrno> {
-    let valid = {
-        let run = vcpu.get_kvm_run();
-        run.kvm_valid_regs
-    };
-    if valid & u64::from(KVM_SYNC_GPRS) != 0 {
-        let run = vcpu.get_kvm_run();
-        Ok(unsafe { run.s.regs }.gprs)
-    } else {
-        vcpu.get_regs().map(|r| r.gprs)
-    }
+    vcpu.get_regs().map(|r| r.gprs)
 }
 
 /// Return `true` if KVM is available, API version is 12, and `KVM_CAP_USER_MEMORY` is present.
@@ -431,7 +425,7 @@ impl VirtualMachine for KvmVm {
     }
 
     fn regs(&self) -> std::result::Result<CommonRegisters, RegisterError> {
-        let mut vcpu = self.vcpu_fd.lock().unwrap();
+        let vcpu = self.vcpu_fd.lock().unwrap();
         // Use `KVM_GET_REGS` as the single source of truth for the architectural GPR file when
         // handing state to higher layers (`dispatch_call_from_host`, `initialise`, etc.).
         //
@@ -442,9 +436,8 @@ impl VirtualMachine for KvmVm {
         // `KVM_GET_REGS`, so the guest resumes with a broken data model and never publishes results
         // to the scratch output buffer (host still sees stack pointer `8`).
         //
-        // `KVM_EXIT_S390_SIEIC` **decode** paths use `gpr_file_for_s390_sie_decode`, which still
-        // prefers `run.s.regs` when advertised, matching `kvm_s390_handle_diag` / instruction
-        // intercept semantics without polluting the general-purpose `regs()` view.
+        // `KVM_EXIT_S390_SIEIC` **decode** paths use `gpr_file_for_s390_sie_decode`, which also
+        // uses `KVM_GET_REGS` only (same rationale: avoid a stale `run.s.regs.gprs` snapshot).
         let kvm_regs = vcpu
             .get_regs()
             .map_err(|e| RegisterError::GetRegs(e.into()))?;

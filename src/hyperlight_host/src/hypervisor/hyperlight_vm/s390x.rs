@@ -297,12 +297,27 @@ impl HyperlightVm {
         .map_err(InitializeError::Run)?;
 
         let regs = self.vm.regs()?;
+        let dispatch_gva = mem_mgr
+            .guest_dispatch_entry_gva
+            .unwrap_or(regs.rcx);
+        if std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG").is_some() {
+            eprintln!(
+                "s390x_io_debug after init halt: rip={:#x} gr2(rcx)={:#x} host_dispatch={:#x?} host_got={:#x?} -> NextAction::Call({:#x}) r15={:#x} r12={:#x}",
+                regs.rip,
+                regs.rcx,
+                mem_mgr.guest_dispatch_entry_gva,
+                mem_mgr.guest_s390x_got_base_gva,
+                dispatch_gva,
+                regs.r15,
+                regs.r12
+            );
+        }
         let sp = regs.r15;
         if !sp.is_multiple_of(8) {
             return Err(InitializeError::InvalidStackPointer(sp));
         }
         self.rsp_gva = sp;
-        self.entrypoint = NextAction::Call(regs.rcx);
+        self.entrypoint = NextAction::Call(dispatch_gva);
 
         Ok(())
     }
@@ -339,6 +354,14 @@ impl HyperlightVm {
             return Err(DispatchGuestCallError::Uninitialized);
         };
 
+        mem_mgr
+            .sync_s390_peb_io_scratch_pointers_from_live_scratch()
+            .map_err(|e| {
+                DispatchGuestCallError::PreDispatch(format!(
+                    "s390x PEB I/O scratch pointer re-sync failed: {e:#}"
+                ))
+            })?;
+
         let r_current = self.vm.regs().map_err(DispatchGuestCallError::SetupRegs)?;
         let base_psw_mask = if r_current.rflags != 0 {
             r_current.rflags
@@ -363,6 +386,9 @@ impl HyperlightVm {
         regs.rdx = 0;
         regs.rsi = 0;
         regs.rdi = 0;
+        if let Some(got_base) = mem_mgr.guest_s390x_got_base_gva {
+            regs.r12 = got_base;
+        }
         self.vm
             .set_regs(&regs)
             .map_err(DispatchGuestCallError::SetupRegs)?;

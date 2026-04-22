@@ -117,21 +117,28 @@ impl FunctionRegistry {
 }
 
 /// The default writer function is to write to stdout with green text.
+///
+/// Never returns `Err` for ordinary terminal quirks: `#[host_function]` guests unwrap the
+/// host return on the success path, so a transient `termcolor` failure would otherwise abort the
+/// guest before it pushes its function result — the host then still sees an empty output stack
+/// (`SP == 8`) at halt.
 #[instrument(err(Debug), skip_all, parent = Span::current(), level = "Trace")]
 pub(super) fn default_writer_func(s: String) -> Result<i32> {
-    match std::io::stdout().is_terminal() {
-        false => {
-            print!("{}", s);
-            Ok(s.len() as i32)
-        }
-        true => {
-            let mut stdout = StandardStream::stdout(ColorChoice::Auto);
-            let mut color_spec = ColorSpec::new();
-            color_spec.set_fg(Some(Color::Green));
+    if std::io::stdout().is_terminal() {
+        let mut stdout = StandardStream::stdout(ColorChoice::Auto);
+        let mut color_spec = ColorSpec::new();
+        color_spec.set_fg(Some(Color::Green));
+        let colored = (|| -> std::io::Result<()> {
             stdout.set_color(&color_spec)?;
             stdout.write_all(s.as_bytes())?;
             stdout.reset()?;
-            Ok(s.len() as i32)
+            Ok(())
+        })();
+        if colored.is_err() {
+            print!("{}", s);
         }
+    } else {
+        print!("{}", s);
     }
+    Ok(s.len() as i32)
 }

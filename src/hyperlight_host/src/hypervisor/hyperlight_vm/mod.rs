@@ -133,6 +133,9 @@ pub enum DispatchGuestCallError {
     SetupRegs(RegisterError),
     #[error("VM was uninitialized")]
     Uninitialized,
+    /// Linux KVM s390x: refresh PEB scratch I/O GPA pointers before running the guest dispatch path.
+    #[error("Pre-dispatch setup failed: {0}")]
+    PreDispatch(String),
 }
 
 impl DispatchGuestCallError {
@@ -142,7 +145,9 @@ impl DispatchGuestCallError {
             // These errors poison the sandbox because they can leave it in an inconsistent state
             // by returning before the guest can unwind properly
             DispatchGuestCallError::Run(_) => true,
-            DispatchGuestCallError::SetupRegs(_) | DispatchGuestCallError::Uninitialized => false,
+            DispatchGuestCallError::SetupRegs(_)
+            | DispatchGuestCallError::Uninitialized
+            | DispatchGuestCallError::PreDispatch(_) => false,
         }
     }
 
@@ -538,6 +543,53 @@ impl HyperlightVm {
 
     pub(crate) fn clear_cancel(&self) {
         self.interrupt_handle.clear_cancel();
+    }
+
+    /// After a failed guest-result pop, log vCPU **PSW** (as `rip` / `rflags`) and selected **GPRs**
+    /// when **`HYPERLIGHT_S390X_IO_DEBUG`** is set to a non-empty value (same gate as
+    /// [`crate::mem::mgr::SandboxMemoryManager::get_guest_function_call_result`] scratch triage).
+    ///
+    /// `CommonRegisters` maps to **`kvm_regs::gprs[0..15]`** in **GPR0..GPR15** order (`rax`..`r15`
+    /// field names are historical x86-style aliases in this crate).
+    #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn log_s390x_io_debug_vcpu_state(&self) {
+        if !std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG")
+            .as_deref()
+            .is_some_and(|v| !v.is_empty())
+        {
+            return;
+        }
+
+        let ep = match self.get_entrypoint() {
+            NextAction::Call(addr) => format!("Call({addr:#x})"),
+            NextAction::Initialise(addr) => format!("Initialise({addr:#x})"),
+            #[cfg(test)]
+            NextAction::None => "None".to_string(),
+        };
+
+        match self.vm.regs() {
+            Ok(r) => {
+                eprintln!("s390x_io_debug host NextAction: {ep}");
+                eprintln!(
+                    "s390x_io_debug vcpu PSW: ia={:#x} mask={:#x} | gpr0..7: {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} {:#x} | gpr14={:#x} gpr15={:#x}",
+                    r.rip,
+                    r.rflags,
+                    r.rax,
+                    r.rbx,
+                    r.rcx,
+                    r.rdx,
+                    r.rsi,
+                    r.rdi,
+                    r.rsp,
+                    r.rbp,
+                    r.r14,
+                    r.r15,
+                );
+            }
+            Err(e) => {
+                eprintln!("s390x_io_debug vcpu: regs() failed: {e:?}");
+            }
+        }
     }
 
     pub(super) fn run(

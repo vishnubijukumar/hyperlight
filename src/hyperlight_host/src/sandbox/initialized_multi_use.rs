@@ -717,7 +717,19 @@ impl MultiUseSandbox {
                 return Err(error);
             }
 
-            let guest_result = self.mem_mgr.get_guest_function_call_result()?.into_inner();
+            let guest_fcr = match self.mem_mgr.get_guest_function_call_result() {
+                Ok(v) => v,
+                Err(e) => {
+                    #[cfg(all(
+                        target_os = "linux",
+                        target_arch = "s390x",
+                        not(feature = "nanvix-unstable")
+                    ))]
+                    self.vm.log_s390x_io_debug_vcpu_state();
+                    return Err(e);
+                }
+            };
+            let guest_result = guest_fcr.into_inner();
 
             match guest_result {
                 Ok(val) => Ok(val),

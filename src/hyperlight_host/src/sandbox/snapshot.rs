@@ -102,6 +102,14 @@ pub struct Snapshot {
 
     /// The next action that should be performed on this snapshot
     entrypoint: NextAction,
+
+    /// Guest virtual address of `dispatch_function` when derived from the ELF symtab at
+    /// snapshot build (`load_addr` + SVMA). Used on s390x after guest init instead of GR2.
+    guest_dispatch_entry_gva: Option<u64>,
+
+    /// Guest virtual address of `_GLOBAL_OFFSET_TABLE_` (`load_addr` + SVMA) when known from the
+    /// ELF symtab. On Linux s390x the host sets **GPR12** to this value before `dispatch_function`.
+    guest_s390x_got_base_gva: Option<u64>,
 }
 impl core::convert::AsRef<Snapshot> for Snapshot {
     fn as_ref(&self) -> &Self {
@@ -294,10 +302,18 @@ unsafe fn guest_page<'a>(
 }
 
 fn map_specials(pt_buf: &GuestPageTableBuffer, scratch_size: usize) {
-    // Map the scratch region
+    // Map the scratch region. On Linux s390x KVM the PEB I/O pointers and the scratch
+    // memslot use the low identity range (`scratch_base_gpa`); guest DAT must map the same
+    // virtual addresses. Other targets keep the historic split (GPA base vs high GVA).
+    let phys_base = scratch_base_gpa(scratch_size);
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    let virt_base = phys_base;
+    #[cfg(not(all(target_arch = "s390x", not(feature = "nanvix-unstable"))))]
+    let virt_base = scratch_base_gva(scratch_size);
+
     let mapping = Mapping {
-        phys_base: scratch_base_gpa(scratch_size),
-        virt_base: scratch_base_gva(scratch_size),
+        phys_base,
+        virt_base,
         len: scratch_size as u64,
         kind: MappingKind::Basic(BasicMapping {
             readable: true,
@@ -352,6 +368,17 @@ impl Snapshot {
 
         let load_addr = layout.get_guest_code_address() as u64;
         let entrypoint_offset: u64 = exe_info.entrypoint().into();
+
+        let guest_dispatch_entry_gva = match &exe_info {
+            ExeInfo::Elf(elf) => elf
+                .dispatch_function_svma()
+                .map(|svma| load_addr.saturating_add(svma)),
+        };
+        let guest_s390x_got_base_gva = match &exe_info {
+            ExeInfo::Elf(elf) => elf
+                .global_offset_table_svma()
+                .map(|svma| load_addr.saturating_add(svma)),
+        };
 
         let mut memory = vec![0; layout.get_memory_size()?];
 
@@ -423,6 +450,8 @@ impl Snapshot {
             stack_top_gva: exn_stack_top_gva,
             sregs: None,
             entrypoint: NextAction::Initialise(load_addr + entrypoint_offset),
+            guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva,
         })
     }
 
@@ -446,6 +475,8 @@ impl Snapshot {
         stack_top_gva: u64,
         sregs: CommonSpecialRegisters,
         entrypoint: NextAction,
+        guest_dispatch_entry_gva: Option<u64>,
+        guest_s390x_got_base_gva: Option<u64>,
     ) -> Result<Self> {
         use std::collections::HashMap;
         let mut phys_seen = HashMap::<u64, usize>::new();
@@ -512,6 +543,8 @@ impl Snapshot {
             stack_top_gva,
             sregs: Some(sregs),
             entrypoint,
+            guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva,
         })
     }
 
@@ -559,6 +592,14 @@ impl Snapshot {
 
     pub(crate) fn entrypoint(&self) -> NextAction {
         self.entrypoint
+    }
+
+    pub(crate) fn guest_dispatch_entry_gva(&self) -> Option<u64> {
+        self.guest_dispatch_entry_gva
+    }
+
+    pub(crate) fn guest_s390x_got_base_gva(&self) -> Option<u64> {
+        self.guest_s390x_got_base_gva
     }
 }
 
@@ -619,6 +660,8 @@ mod tests {
             make_simple_pt_mem(&[0u8; PAGE_SIZE]),
             scratch_mem,
             super::NextAction::None,
+            None,
+            None,
         );
         let (mgr, _) = mgr.build().unwrap();
         (mgr, SIMPLE_PT_BASE as u64)
@@ -641,6 +684,8 @@ mod tests {
             0,
             default_sregs(),
             super::NextAction::None,
+            None,
+            None,
         )
         .unwrap();
 
@@ -657,6 +702,8 @@ mod tests {
             0,
             default_sregs(),
             super::NextAction::None,
+            None,
+            None,
         )
         .unwrap();
 

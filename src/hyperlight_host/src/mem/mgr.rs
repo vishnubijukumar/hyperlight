@@ -144,6 +144,11 @@ pub(crate) struct SandboxMemoryManager<S: SharedMemory> {
     pub(crate) layout: SandboxMemoryLayout,
     /// Offset for the execution entrypoint from `load_addr`
     pub(crate) entrypoint: NextAction,
+    /// Linux s390x: guest VA of `dispatch_function` (`load_addr` + SVMA) when known from the ELF
+    /// symtab. Used to set [`NextAction::Call`] after init when the vCPU GR2 snapshot is wrong.
+    pub(crate) guest_dispatch_entry_gva: Option<u64>,
+    /// Linux s390x: guest VA of `_GLOBAL_OFFSET_TABLE_` for restoring **GPR12** before dispatch.
+    pub(crate) guest_s390x_got_base_gva: Option<u64>,
     /// How many memory regions were mapped after sandbox creation
     pub(crate) mapped_rgns: u64,
     /// Buffer for accumulating guest abort messages
@@ -249,12 +254,16 @@ where
         shared_mem: SnapshotSharedMemory<S>,
         scratch_mem: S,
         entrypoint: NextAction,
+        guest_dispatch_entry_gva: Option<u64>,
+        guest_s390x_got_base_gva: Option<u64>,
     ) -> Self {
         Self {
             layout,
             shared_mem,
             scratch_mem,
             entrypoint,
+            guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva,
             mapped_rgns: 0,
             abort_buffer: Vec::new(),
         }
@@ -286,6 +295,8 @@ where
             rsp_gva,
             sregs,
             entrypoint,
+            self.guest_dispatch_entry_gva,
+            self.guest_s390x_got_base_gva,
         )
     }
 }
@@ -297,7 +308,16 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
         let scratch_mem = ExclusiveSharedMemory::new(layout.get_scratch_size())?;
         let layout = layout.with_mapped_scratch_size(scratch_mem.mem_size())?;
         let entrypoint = s.entrypoint();
-        Ok(Self::new(layout, shared_mem, scratch_mem, entrypoint))
+        let guest_dispatch_entry_gva = s.guest_dispatch_entry_gva();
+        let guest_s390x_got_base_gva = s.guest_s390x_got_base_gva();
+        Ok(Self::new(
+            layout,
+            shared_mem,
+            scratch_mem,
+            entrypoint,
+            guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva,
+        ))
     }
 
     /// Wraps ExclusiveSharedMemory::build
@@ -324,6 +344,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             scratch_mem: hscratch,
             layout,
             entrypoint: self.entrypoint,
+            guest_dispatch_entry_gva: self.guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva: self.guest_s390x_got_base_gva,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: self.abort_buffer,
         };
@@ -332,6 +354,8 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
             scratch_mem: gscratch,
             layout,
             entrypoint: self.entrypoint,
+            guest_dispatch_entry_gva: self.guest_dispatch_entry_gva,
+            guest_s390x_got_base_gva: self.guest_s390x_got_base_gva,
             mapped_rgns: self.mapped_rgns,
             abort_buffer: Vec::new(), // Guest doesn't need abort buffer
         };
@@ -341,6 +365,27 @@ impl SandboxMemoryManager<ExclusiveSharedMemory> {
 }
 
 impl SandboxMemoryManager<HostSharedMemory> {
+    /// Re-write PEB `input_stack.ptr` / `output_stack.ptr` using [`SandboxMemoryLayout::sync_s390_peb_io_scratch_pointers`]
+    /// and the **live** scratch mapping size (`scratch_mem.mem_size()`).
+    ///
+    /// Intended for Linux KVM s390x where scratch is a low GPA window: if those pointers ever
+    /// disagree with the memslot while the host reads the scratch output region, the host can see
+    /// an uninitialized stack cursor (`8`) even after a successful guest halt.
+    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn sync_s390_peb_io_scratch_pointers_from_live_scratch(&self) -> Result<()> {
+        let live = self.scratch_mem.mem_size();
+        self.layout.sync_s390_peb_io_scratch_pointers(live, |off, v| {
+            #[cfg(unshared_snapshot_mem)]
+            {
+                self.shared_mem.write(off, v)
+            }
+            #[cfg(not(unshared_snapshot_mem))]
+            {
+                self.shared_mem.host_write_native_u64_at(off, v)
+            }
+        })
+    }
+
     /// Write a [`FileMappingInfo`] entry into the PEB's preallocated array.
     ///
     /// Reads the current entry count from the PEB, validates that the
@@ -470,8 +515,13 @@ impl SandboxMemoryManager<HostSharedMemory> {
 
     /// When popping the guest result fails, optionally log scratch + PEB I/O fields (s390x triage).
     ///
-    /// Set **`HYPERLIGHT_S390X_IO_DEBUG=1`** and run tests with **`--nocapture`** to print the dump
-    /// to stderr.
+    /// Set **`HYPERLIGHT_S390X_IO_DEBUG`** (any non-empty value) and run tests with **`--nocapture`**
+    /// to print the dump to stderr. The first qword at each I/O stack base is shown as **LE / BE /
+    /// host-native** decodings so an endian mix-up is visible at a glance; Hyperlight’s scratch
+    /// stack cursors are **always LE** on the wire (see `update_scratch_bookkeeping` and
+    /// `hyperlight_guest::guest_handle::io`). When a guest call fails while reading the return
+    /// blob, [`HyperlightVm::log_s390x_io_debug_vcpu_state`](crate::hypervisor::hyperlight_vm::HyperlightVm::log_s390x_io_debug_vcpu_state)
+    /// also prints **PSW + GPRs** (same env var).
     #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
     fn log_s390x_guest_output_pop_debug(
         &self,
@@ -498,16 +548,29 @@ impl SandboxMemoryManager<HostSharedMemory> {
                 let _ = write!(&mut msg, "{b:02x} ");
             }
             let _ = writeln!(&mut msg);
+            if buf.len() >= 8 {
+                let mut q = [0u8; 8];
+                q.copy_from_slice(&buf[..8]);
+                let le = u64::from_le_bytes(q);
+                let be = u64::from_be_bytes(q);
+                let ne = u64::from_ne_bytes(q);
+                let _ = writeln!(
+                    &mut msg,
+                    "output_stack_head[0..8] as u64: le={le} be={be} ne={ne} (wire format is LE; empty stack cursor is le=8 => bytes 08 00 00 00 00 00 00 00)",
+                );
+            }
         }
 
         let in_off = self.layout.get_input_data_buffer_scratch_host_offset();
         let in_sz = self.layout.sandbox_memory_config.get_input_data_size();
         let mut ib = [0u8; 8];
         if self.scratch_mem.copy_to_slice(&mut ib[..], in_off).is_ok() {
+            let le = u64::from_le_bytes(ib);
+            let be = u64::from_be_bytes(ib);
+            let ne = u64::from_ne_bytes(ib);
             let _ = writeln!(
                 &mut msg,
-                "input_scratch_sp_le={} (in_off={in_off} in_sz={in_sz})",
-                u64::from_le_bytes(ib),
+                "input_stack_head[0..8] as u64: le={le} be={be} ne={ne} (in_off={in_off} in_sz={in_sz}; wire format is LE)",
             );
         }
 
@@ -557,7 +620,10 @@ impl SandboxMemoryManager<HostSharedMemory> {
             }
         }
 
-        if std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG").is_some() {
+        if std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG")
+            .as_deref()
+            .is_some_and(|v| !v.is_empty())
+        {
             eprintln!("{}", msg.trim_end());
         }
     }
