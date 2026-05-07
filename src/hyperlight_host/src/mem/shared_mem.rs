@@ -479,11 +479,11 @@ impl ExclusiveSharedMemory {
     #[instrument(skip_all, parent = Span::current(), level= "Trace")]
     pub fn new(min_size_bytes: usize) -> Result<Self> {
         use libc::{
-            MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, c_int, mmap, munmap,
-            off_t, size_t,
+            MAP_ANONYMOUS, MAP_FAILED, MAP_NORESERVE, MAP_SHARED, PROT_READ, PROT_WRITE, c_int,
+            mmap, munmap, off_t, size_t,
         };
         #[cfg(not(miri))]
-        use libc::{MAP_NORESERVE, PROT_NONE, mprotect};
+        use libc::{PROT_NONE, mprotect};
 
         if min_size_bytes == 0 {
             return Err(new_error!("Cannot create shared memory with size 0"));
@@ -512,10 +512,13 @@ impl ExclusiveSharedMemory {
             ));
         }
 
+        // KVM user memory must stay backed by the same host PFNs the guest observes. With
+        // `MAP_PRIVATE`, some Linux/s390x paths have been observed to leave the guest seeing a
+        // stale scratch I/O view (stack cursor stuck at `8`) while the host updates succeed.
         #[cfg(not(miri))]
-        let flags = MAP_ANONYMOUS | MAP_PRIVATE | MAP_NORESERVE;
+        let flags = MAP_ANONYMOUS | MAP_SHARED | MAP_NORESERVE;
         #[cfg(miri)]
-        let flags = MAP_ANONYMOUS | MAP_PRIVATE;
+        let flags = MAP_ANONYMOUS | MAP_SHARED;
 
         let addr = unsafe {
             mmap(
@@ -915,6 +918,55 @@ impl GuestSharedMemory {
         };
         mapping_at(self, guest_base, region_type, flags)
     }
+
+    /// Copy bytes out of the guest-visible mapping.
+    ///
+    /// This mirrors [`HostSharedMemory::copy_to_slice`] but is available on the guest view so
+    /// KVM debug paths (e.g. s390x lowcore dumps) can read mapped memory without requiring `&mut`
+    /// access to a `SharedMemory` trait object.
+    pub(crate) fn copy_to_slice(&self, slice: &mut [u8], offset: usize) -> Result<()> {
+        bounds_check!(offset, slice.len(), self.mem_size());
+        let base = self.base_ptr().wrapping_add(offset);
+        let guard = self
+            .lock
+            .try_read()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+
+        const CHUNK: usize = size_of::<u128>();
+        let len = slice.len();
+        let mut i = 0;
+
+        // Handle unaligned head bytes until we reach u128 alignment.
+        let align_offset = base.align_offset(align_of::<u128>());
+        let head_len = align_offset.min(len);
+        while i < head_len {
+            unsafe {
+                slice[i] = base.add(i).read_volatile();
+            }
+            i += 1;
+        }
+
+        // Read aligned u128 chunks.
+        let dst = slice.as_mut_ptr();
+        while i + CHUNK <= len {
+            unsafe {
+                let value = (base.add(i) as *const u128).read_volatile();
+                std::ptr::write_unaligned(dst.add(i) as *mut u128, value);
+            }
+            i += CHUNK;
+        }
+
+        // Tail bytes.
+        while i < len {
+            unsafe {
+                slice[i] = base.add(i).read_volatile();
+            }
+            i += 1;
+        }
+
+        drop(guard);
+        Ok(())
+    }
 }
 
 /// A trait that abstracts over the particular kind of SharedMemory,
@@ -1131,6 +1183,39 @@ impl HostSharedMemory {
             );
             self.copy_from_slice(slice, offset)?;
         }
+        Ok(())
+    }
+
+    /// Linux KVM s390x: patch a native-endian `u64` into guest-visible snapshot RAM with one
+    /// aligned volatile store.
+    ///
+    /// `build.rs` enables `unshared_snapshot_mem` on s390x, so the snapshot side is
+    /// [`HostSharedMemory`] and PEB I/O pointer refresh must not go through [`Self::write`]
+    /// alone—use this for `HyperlightPEB` `input_stack.ptr` / `output_stack.ptr` (see
+    /// [`crate::mem::layout::SandboxMemoryLayout::sync_s390_peb_io_scratch_pointers`]).
+    #[cfg(all(
+        target_os = "linux",
+        target_arch = "s390x",
+        not(feature = "nanvix-unstable")
+    ))]
+    pub(crate) fn write_native_u64_volatile_at(&self, offset: usize, value: u64) -> Result<()> {
+        bounds_check!(offset, size_of::<u64>(), self.mem_size());
+        debug_assert_eq!(
+            offset % align_of::<u64>(),
+            0,
+            "write_native_u64_volatile_at offset must be u64-aligned"
+        );
+        let guard = self
+            .lock
+            .try_read()
+            .map_err(|e| new_error!("Error locking at {}:{}: {}", file!(), line!(), e))?;
+        unsafe {
+            self.base_ptr()
+                .add(offset)
+                .cast::<u64>()
+                .write_volatile(value);
+        }
+        drop(guard);
         Ok(())
     }
 
@@ -2269,20 +2354,6 @@ impl ReadonlySharedMemory {
 
     pub(crate) fn as_slice(&self) -> &[u8] {
         unsafe { std::slice::from_raw_parts(self.base_ptr(), self.mem_size()) }
-    }
-
-    /// Host-only: patch a native-endian `u64` into the snapshot backing store.
-    ///
-    /// The sandbox must not be executing the guest while this runs (see
-    /// [`crate::mem::mgr::SandboxMemoryManager::update_scratch_bookkeeping`]).
-    #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
-    pub(crate) fn host_write_native_u64_at(&self, offset: usize, value: u64) -> Result<()> {
-        bounds_check!(offset, size_of::<u64>(), self.mem_size());
-        let b = value.to_ne_bytes();
-        unsafe {
-            std::ptr::copy_nonoverlapping(b.as_ptr(), self.base_ptr().add(offset), 8);
-        }
-        Ok(())
     }
 
     #[cfg(unshared_snapshot_mem)]

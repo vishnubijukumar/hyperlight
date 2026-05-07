@@ -26,6 +26,33 @@ pub(crate) mod machine;
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 
+// Bring-up debug printing uses one DIAG intercept per character and can dominate execution
+// during init retries. Keep it off by default so examples like `hello-world` can make progress.
+const S390X_BRINGUP_DEBUG_PRINTS: bool = false;
+
+#[inline]
+fn s390x_debug_print_bytes(bytes: &[u8]) {
+    // DebugPrint path expects UTF-8; our payloads are ASCII.
+    let s = unsafe { core::str::from_utf8_unchecked(bytes) };
+    hyperlight_guest::exit::debug_print(s);
+}
+
+#[inline]
+fn s390x_debug_print_hex_u64(label: &[u8], v: u64) {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut buf = [0u8; 2 + 16];
+    buf[0] = b'0';
+    buf[1] = b'x';
+    for i in 0..16 {
+        let shift = 60usize.saturating_sub(i * 4);
+        let nib = ((v >> shift) & 0xf) as usize;
+        buf[2 + i] = HEX[nib];
+    }
+    s390x_debug_print_bytes(label);
+    s390x_debug_print_bytes(&buf);
+    s390x_debug_print_bytes(b"\n");
+}
+
 /// Exit to the host with `VmAction::Halt` (amd64 OUT+hlt equivalent): used after init and dispatch.
 ///
 /// Uses **`%r4` / `%r5`** for the `DIAG` operands (not **`%r2` / `%r3`**): `generic_init` returns the
@@ -97,6 +124,10 @@ pub extern "C" fn entrypoint(
     max_log_level: u64,
     live_scratch_bytes: u64,
 ) -> ! {
+    if S390X_BRINGUP_DEBUG_PRINTS {
+        // s390x bring-up: print the PEB pointer we were given (no scratch required).
+        s390x_debug_print_hex_u64(b"s390x_guest entry peb=", peb_address);
+    }
     let dispatch =
         crate::generic_init(peb_address, seed, ops, max_log_level, live_scratch_bytes);
     s390x_halt_after_init_dispatch_in_r2(dispatch);

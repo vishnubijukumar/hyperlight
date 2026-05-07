@@ -25,9 +25,12 @@ use crate::GUEST_HANDLE;
 struct GuestLogger {}
 
 pub(crate) fn init_logger(filter: LevelFilter) {
-    // if this `expect` fails we have no way to recover anyway, so we actually prefer a panic here
-    // below temporary guest logger is promoted to static by the compiler.
-    log::set_logger(&GuestLogger {}).expect("unable to setup guest logger");
+    // `log::set_logger` can only succeed once per process. On s390x KVM bring-up we may retry the
+    // first guest entry after a stale WAIT/interrupt state; if the logger was already installed,
+    // keep going and just update the max level.
+    //
+    // The temporary `GuestLogger` is promoted to static by the compiler.
+    let _ = log::set_logger(&GuestLogger {});
     log::set_max_level(filter);
 }
 

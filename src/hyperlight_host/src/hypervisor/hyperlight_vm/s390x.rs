@@ -73,13 +73,16 @@ const PSW_MASK_CC: u64 = 0x0000_3000_0000_0000;
 const PSW_MASK_DAT: u64 = 0x0400_0000_0000_0000;
 /// `PSW_MASK_PSTATE` — problem state; if set, privileged instructions trap (see `kvm/s390x.rs`).
 const PSW_MASK_PSTATE: u64 = 0x0001_0000_0000_0000;
+/// `PSW_MASK_WAIT` — see `kvm/s390x.rs` (`psw_mask_hyperlight`).
+const PSW_MASK_WAIT: u64 = 0x0002_0000_0000_0000;
 /// Default runnable-guest PSW mask; must stay in sync with `kvm/s390x.rs` `DEFAULT_S390_PSW_MASK`.
 const S390_DEFAULT_PSW_MASK: u64 = 0x0000_0001_8000_0000;
 
-/// Match `kvm/s390x::psw_mask_hyperlight`: never run the guest dispatch PSW with DAT or PSTATE set.
+/// Match `kvm/s390x::psw_mask_hyperlight`: never run the guest dispatch PSW with DAT, PSTATE, or
+/// WAIT set.
 #[inline]
 fn s390_psw_mask_strip_dat_pstate(mask: u64) -> u64 {
-    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE
+    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE & !PSW_MASK_WAIT
 }
 
 #[inline]
@@ -207,23 +210,71 @@ impl HyperlightVm {
             const MIB: usize = 1 << 20;
             let mut low_eshm = ExclusiveSharedMemory::new(MIB)
                 .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(e.to_string()))?;
-            // Linux `struct lowcore` `program_new_psw` @ real 0x1d0. All-zero lets KVM / the CPU
-            // load an invalid PSW on program-interrupt presentation (e.g. after userspace
-            // `KVM_S390_INTERRUPT`), which can recurse into `ICPT_OPEREXC` and spin the host run
-            // loop. Prime a disabled-wait PSW (big-endian doublewords: mask, IA). That state
-            // surfaces as `KVM_EXIT_S390_SIEIC` / `ICPT_WAIT` (`0x1c`); `kvm/s390x.rs` maps it to
-            // `VmExit::Halt` so the run loop can finish.
+            // Linux s390x `struct lowcore` contains multiple PSWs. If we leave them as all-zero
+            // and the guest takes a program interruption early in bring-up, the CPU can load a
+            // nonsense PSW and end up "executing" inside lowcore (e.g. at 0x102), leading to an
+            // `ICPT_WAIT` / `ICPT_OPEREXC` loop that never advances scratch I/O.
+            //
+            // Prime:
+            // - `restart_psw` @ 0x1a0: point at our current intended entrypoint.
+            // - `program_new_psw` @ 0x1d0: point at a tiny lowcore-resident stub that triggers a
+            //   Hyperlight `outb Abort` (explicit failure) without requiring scratch to work.
+            const LC_STUB: usize = 0x100;
+            const LC_RESTART_PSW: usize = 0x1a0;
             const LC_PROGRAM_NEW_PSW: usize = 0x1d0;
-            const PSW_MASK_WAIT: u64 = 0x0002_0000_0000_0000;
             const PSW_MASK_EA: u64 = 0x0000_0001_0000_0000;
             const PSW_MASK_BA: u64 = 0x0000_0000_8000_0000;
-            let wait_mask: u64 = PSW_MASK_WAIT | PSW_MASK_EA | PSW_MASK_BA;
-            let mut psw_lc: [u8; 16] = [0; 16];
-            psw_lc[0..8].copy_from_slice(&wait_mask.to_be_bytes());
-            psw_lc[8..16].copy_from_slice(&0u64.to_be_bytes());
+            let runnable_mask: u64 = PSW_MASK_EA | PSW_MASK_BA;
+
+            let entry_ia: u64 = match entrypoint {
+                NextAction::Initialise(addr) => addr,
+                NextAction::Call(addr) => addr,
+                #[cfg(test)]
+                NextAction::None => 0,
+            };
+
+            let mut restart_psw: [u8; 16] = [0; 16];
+            restart_psw[0..8].copy_from_slice(&runnable_mask.to_be_bytes());
+            restart_psw[8..16].copy_from_slice(&entry_ia.to_be_bytes());
             low_eshm
-                .copy_from_slice(&psw_lc, LC_PROGRAM_NEW_PSW)
+                .copy_from_slice(&restart_psw, LC_RESTART_PSW)
                 .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(format!("{e:#}")))?;
+
+            // Lowcore stub: send an `outb Abort` with code=8 and a terminator (0xFF) in a single
+            // DIAG exit, so even if the host doesn't advance PSW for this intercept we won't spam
+            // the abort buffer and overflow it.
+            //
+            // r4 = OutBAction::Abort (102)
+            // r5 = u32 packed as little-endian [len, b1, b2, b3]
+            //   - [2, 8, 0xFF, 0]  (code byte + terminator)
+            // DIAG r4,r5,0x3e8 triggers the host intercept path.
+            //
+            // Instruction encodings (big-endian bytes):
+            // - lghi r4, 102     => a7 49 00 66
+            // - lghi r5, 0xff    => a7 59 00 ff
+            // - sllg r5,r5,16    => eb 55 00 10 00 0d
+            // - oill r5, 0x0802  => a5 5b 08 02
+            // - diag r4,r5,0x3e8 => 83 45 03 e8
+            // - j .              => a7 f4 00 00  (safety loop)
+            let stub: [u8; 26] = [
+                0xa7, 0x49, 0x00, 0x66, // lghi r4,102
+                0xa7, 0x59, 0x00, 0xff, // lghi r5,255
+                0xeb, 0x55, 0x00, 0x10, 0x00, 0x0d, // sllg r5,r5,16
+                0xa5, 0x5b, 0x08, 0x02, // oill r5,0x0802
+                0x83, 0x45, 0x03, 0xe8, // diag r4,r5,0x3e8
+                0xa7, 0xf4, 0x00, 0x00, // j . (spin safely if resumed)
+            ];
+            low_eshm
+                .copy_from_slice(&stub, LC_STUB)
+                .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(format!("{e:#}")))?;
+
+            let mut program_new_psw: [u8; 16] = [0; 16];
+            program_new_psw[0..8].copy_from_slice(&runnable_mask.to_be_bytes());
+            program_new_psw[8..16].copy_from_slice(&(LC_STUB as u64).to_be_bytes());
+            low_eshm
+                .copy_from_slice(&program_new_psw, LC_PROGRAM_NEW_PSW)
+                .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(format!("{e:#}")))?;
+
             let (_h, low_guest) = low_eshm.build();
             let low_rgn = low_guest.mapping_at(0, MemoryRegionType::S390xLowcore);
             unsafe {
@@ -260,7 +311,7 @@ impl HyperlightVm {
         page_size: u32,
         mem_mgr: &mut SandboxMemoryManager<HostSharedMemory>,
         host_funcs: &Arc<Mutex<FunctionRegistry>>,
-        guest_max_log_level: Option<LevelFilter>,
+        _guest_max_log_level: Option<LevelFilter>,
         #[cfg(gdb)] dbg_mem_access_fn: Arc<Mutex<SandboxMemoryManager<HostSharedMemory>>>,
     ) -> std::result::Result<(), InitializeError> {
         let NextAction::Initialise(initialise) = self.entrypoint else {
@@ -270,13 +321,15 @@ impl HyperlightVm {
         // s390x ELF ABI: integer args in r2–r5 (`kvm_regs::gprs[2..5]` == rcx, rdx, rsi, rdi in
         // `CommonRegisters`), stack in r15, return values in r2 (== `regs.rcx`).
         // `rip` / `rflags` are the guest PSW IA and mask via `kvm_run`.
-        let regs = CommonRegisters {
+        let mut regs = CommonRegisters {
             rip: initialise,
             r15: self.rsp_gva,
             rcx: peb_addr.into(),
             rdx: seed,
             rsi: page_size.into(),
-            rdi: super::get_guest_log_filter(guest_max_log_level),
+            // s390x bring-up: disable guest logging until the KVM run loop no longer hits
+            // lowcore disabled-wait paths that make host/guest log handshakes unreliable.
+            rdi: 0,
             // `CommonRegisters::rsp` maps to KVM GPR6. The s390x entry ABI passes a fifth
             // argument to `entrypoint` / `generic_init` in GR6: live scratch size in bytes
             // (must match `SandboxMemoryLayout::get_scratch_size` and the scratch memslot).
@@ -286,6 +339,13 @@ impl HyperlightVm {
             rflags: S390_DEFAULT_PSW_MASK,
             ..Default::default()
         };
+        // s390x ELF PIC code relies on `%r12` as the GOT/TOC base. If we don't seed it before the
+        // guest entrypoint runs, the very first global access can program-interrupt and land in
+        // lowcore `program_new_psw` (disabled wait), making the host think the guest halted while
+        // scratch I/O cursors never advanced.
+        if let Some(got_base) = mem_mgr.guest_s390x_got_base_gva {
+            regs.r12 = got_base;
+        }
         self.vm.set_regs(&regs)?;
 
         self.run(
@@ -300,18 +360,6 @@ impl HyperlightVm {
         let dispatch_gva = mem_mgr
             .guest_dispatch_entry_gva
             .unwrap_or(regs.rcx);
-        if std::env::var_os("HYPERLIGHT_S390X_IO_DEBUG").is_some() {
-            eprintln!(
-                "s390x_io_debug after init halt: rip={:#x} gr2(rcx)={:#x} host_dispatch={:#x?} host_got={:#x?} -> NextAction::Call({:#x}) r15={:#x} r12={:#x}",
-                regs.rip,
-                regs.rcx,
-                mem_mgr.guest_dispatch_entry_gva,
-                mem_mgr.guest_s390x_got_base_gva,
-                dispatch_gva,
-                regs.r15,
-                regs.r12
-            );
-        }
         let sp = regs.r15;
         if !sp.is_multiple_of(8) {
             return Err(InitializeError::InvalidStackPointer(sp));
@@ -362,22 +410,20 @@ impl HyperlightVm {
                 ))
             })?;
 
+        // Order scratch IPC writes (push_buffer) and PEB pointer patches before KVM_RUN so the
+        // guest never observes the old stack cursor with the new I/O GPA window (or vice versa).
+        #[cfg(not(feature = "nanvix-unstable"))]
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+
         let r_current = self.vm.regs().map_err(DispatchGuestCallError::SetupRegs)?;
-        let base_psw_mask = if r_current.rflags != 0 {
+        let base_raw = if r_current.rflags != 0 {
             r_current.rflags
         } else {
             S390_DEFAULT_PSW_MASK
         };
+        let base_psw_mask = s390_psw_mask_strip_dat_pstate(base_raw);
         let rflags = s390_psw_mask_for_dispatch(base_psw_mask, self.pending_tlb_flush);
 
-        // `CommonRegisters` maps to KVM `gprs[0..15]` in field order — that is **s390x GPR0..GPR15**
-        // (see `hypervisor/regs/s390x/mod.rs`), not x86 register semantics.
-        //
-        // Guest entry put `generic_init` leftovers in GPR2..GPR5 only (`rcx`..`rdi` here). We must
-        // clear those before `dispatch_function` / `internal_dispatch_function` (no args), but
-        // **must not** zero `rsp` / `rbp` / `r8`..`r11`: those slots are **GPR6..GPR11**, which are
-        // **callee-saved** on Linux s390x. The previous `rsp: 0` + `..Default::default()` cleared
-        // GPR6..GPR11 and broke the guest Rust runtime so scratch output never advanced.
         let mut regs = r_current;
         regs.rip = dispatch_func_addr;
         regs.r15 = self.rsp_gva;
@@ -389,6 +435,7 @@ impl HyperlightVm {
         if let Some(got_base) = mem_mgr.guest_s390x_got_base_gva {
             regs.r12 = got_base;
         }
+
         self.vm
             .set_regs(&regs)
             .map_err(DispatchGuestCallError::SetupRegs)?;
@@ -444,5 +491,65 @@ impl HyperlightVm {
         }
 
         Ok(())
+    }
+
+    /// Dump the first 0x200 bytes of lowcore/PSA (guest real 0) for s390x KVM bring-up.
+    ///
+    /// This is intended for diagnosing program interruptions that load `program_new_psw` and
+    /// end up in disabled-wait (`ICPT_WAIT`, PSW IA=0), which otherwise looks like a normal halt
+    /// and leads to the host reading empty scratch I/O (`stack pointer: 8`).
+    #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+    pub(crate) fn dump_s390x_lowcore(&self) {
+        let Some(low) = &self.s390x_lowcore_guest_mem else {
+            eprintln!("s390x_lowcore_dump: no lowcore mapping present");
+            return;
+        };
+        let mut buf = [0u8; 0x400];
+        if low.copy_to_slice(&mut buf, 0).is_err() {
+            eprintln!("s390x_lowcore_dump: copy_to_slice failed");
+            return;
+        }
+        eprintln!("s390x_lowcore_dump[0..0x400]:");
+        for (i, chunk) in buf.chunks(16).enumerate() {
+            let off = i * 16;
+            eprint!("{off:04x}:");
+            for b in chunk {
+                eprint!(" {b:02x}");
+            }
+            eprintln!();
+        }
+        // Also show the exact bytes we primed for `program_new_psw` (0x1d0..0x1df).
+        eprint!("s390x_lowcore_dump program_new_psw[0x1d0..0x1e0]:");
+        for b in &buf[0x1d0..0x1e0] {
+            eprint!(" {b:02x}");
+        }
+        eprintln!();
+
+        // Decode key lowcore fields (Linux `arch/s390/include/asm/lowcore.h`):
+        // - `pgm_int_code`: ILC @ 0x8c (u16), code @ 0x8e (u16)
+        // - `data_exc_code`: 0x90 (u32)
+        // - `trans_exc_code`: 0x00a8 (u64)
+        // - `failing_storage_address`: 0x00f8 (u64)
+        // - `pgm_last_break`: 0x110 (u64)
+        // - `program_old_psw`: 0x150 (u128 = mask, ia; big-endian doublewords)
+        let pgm_ilc = u16::from_be_bytes([buf[0x8c], buf[0x8d]]);
+        let pgm_code = u16::from_be_bytes([buf[0x8e], buf[0x8f]]);
+        let data_exc_code = u32::from_be_bytes(buf[0x90..0x94].try_into().unwrap());
+        let trans_exc_code = u64::from_be_bytes(buf[0x0a8..0x0b0].try_into().unwrap());
+        let failing_storage_address = u64::from_be_bytes(buf[0x0f8..0x100].try_into().unwrap());
+        let pgm_last_break = u64::from_be_bytes(buf[0x110..0x118].try_into().unwrap());
+        let program_old_mask = u64::from_be_bytes(buf[0x150..0x158].try_into().unwrap());
+        let program_old_ia = u64::from_be_bytes(buf[0x158..0x160].try_into().unwrap());
+        eprintln!(
+            "s390x_lowcore_decode: pgm_ilc={:#x} pgm_code={:#x} data_exc_code={:#x} trans_exc_code={:#x} failing_storage_address={:#x} pgm_last_break={:#x} program_old_psw: mask={:#x} ia={:#x}",
+            pgm_ilc,
+            pgm_code,
+            data_exc_code,
+            trans_exc_code,
+            failing_storage_address,
+            pgm_last_break,
+            program_old_mask,
+            program_old_ia
+        );
     }
 }

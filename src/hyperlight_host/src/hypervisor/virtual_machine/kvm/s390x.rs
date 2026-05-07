@@ -16,6 +16,7 @@ limitations under the License.
 
 use std::sync::LazyLock;
 use std::sync::Mutex;
+use std::mem;
 
 use hyperlight_common::outb::{S390X_HYPERLIGHT_DIAG_IO, VmAction};
 use kvm_bindings::{
@@ -61,9 +62,17 @@ const PSW_MASK_DAT: u64 = 0x0400_0000_0000_0000;
 /// host never sees guest output (`try_pop_buffer_into` still sees stack pointer `8`).
 const PSW_MASK_PSTATE: u64 = 0x0001_0000_0000_0000;
 
+/// `PSW_MASK_WAIT` from Linux `arch/s390/include/uapi/asm/ptrace.h` (disabled wait / wait state).
+///
+/// If **set**, the CPU may not execute the instruction at `psw_addr` until a wait-ending event
+/// occurs. KVM can leave **WAIT** set across exits; the next `KVM_RUN` then returns immediately
+/// via `ICPT_WAIT` (`VmExit::Halt` mapping) with **IA unchanged**, so the guest never runs
+/// `dispatch_function` and scratch I/O buffers stay at their reset cursors (`8` / `164` on the wire).
+const PSW_MASK_WAIT: u64 = 0x0002_0000_0000_0000;
+
 #[inline]
 fn psw_mask_hyperlight(mask: u64) -> u64 {
-    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE
+    mask & !PSW_MASK_DAT & !PSW_MASK_PSTATE & !PSW_MASK_WAIT
 }
 
 /// Instruction interception: guest executed an instruction the kernel did not complete.
@@ -76,8 +85,7 @@ const ICPT_INSTRUCTION_PROGI: u8 = 0x0c;
 /// a program new PSW that enters wait). Decimal **28** == `0x1c`.
 const ICPT_WAIT: u8 = 0x1c;
 const S390_INSN_DIAG_OPCODE: u8 = 0x83;
-/// Length of `DIAG` on z/Architecture (no execute prefix).
-const S390_DIAG_INSN_LEN: u64 = 4;
+// `DIAG` instruction length is 4 bytes on z/Architecture (no execute prefix).
 
 /// Some KVM / SIE paths expose the faulting halfword in **big-endian** wire order (`0x83XY`);
 /// others surface the same two bytes as a native `u16` in **little-endian** storage order
@@ -294,17 +302,37 @@ impl KvmVm {
         // PSW address at `KVM_RUN` entry (mirrors `run.psw_addr` we program below). Used after a
         // Hyperlight `DIAG` exit: some KVM versions leave `psw_addr` on the faulting instruction,
         // others already advance it before returning `KVM_EXIT_S390_SIEIC`. Unconditionally adding
-        // `S390_DIAG_INSN_LEN` when the kernel already advanced would skip the next guest insn.
-        let (ia_at_kvm_run_entry, mapped) = {
+        // advancing the PSW when the kernel already advanced would skip the next guest insn.
+        let debug = std::env::var_os("HYPERLIGHT_S390X_KVM_RUN_DEBUG")
+            .as_deref()
+            .is_some_and(|v| !v.is_empty());
+
+        // If we see ICPT_WAIT with `psw_addr==0`, we likely loaded lowcore `program_new_psw`
+        // (disabled wait @ 0). Retry at most once to recover from stale KVM state; if it repeats,
+        // surface it as an unexpected VM exit rather than looping forever.
+        const MAX_ICPT_WAIT_RETRIES: usize = 1;
+        let (_ia_at_kvm_run_entry, mapped, exit_psw_addr, exit_psw_mask) = {
             let mut vcpu = self.vcpu_fd.lock().unwrap();
-            let ia_at_kvm_run_entry = {
-                let (addr, mask) = *self.shadow_psw.lock().unwrap();
-                let run = vcpu.get_kvm_run();
-                run.psw_addr = addr;
-                run.psw_mask = psw_mask_hyperlight(mask);
-                addr
-            };
-            let m = match vcpu.run() {
+            let mut icpt_wait_retries = 0usize;
+
+            // Always compute and program the intended PSW at entry.
+            let (desired_addr, desired_mask) = *self.shadow_psw.lock().unwrap();
+            let desired_mask = psw_mask_hyperlight(desired_mask);
+
+            loop {
+                let ia_at_kvm_run_entry = {
+                    let run = vcpu.get_kvm_run();
+                    run.psw_addr = desired_addr;
+                    run.psw_mask = desired_mask;
+                    if debug {
+                        eprintln!(
+                            "s390x_kvm_run_debug entry: psw_addr={:#x} psw_mask={:#x} (retry_icpt_wait={icpt_wait_retries})",
+                            run.psw_addr, run.psw_mask
+                        );
+                    }
+                    desired_addr
+                };
+                let m = match vcpu.run() {
                 Ok(VcpuExit::Hlt) => RunExit::Halt,
                 Ok(VcpuExit::IoOut(port, data)) => {
                     if port == VmAction::Halt as u16 {
@@ -318,19 +346,88 @@ impl KvmVm {
                         let run = vcpu.get_kvm_run();
                         unsafe { run.__bindgen_anon_1.s390_sieic }
                     };
+                    if debug {
+                        let run = vcpu.get_kvm_run();
+                        eprintln!(
+                            "s390x_kvm_run_debug exit: S390Sieic icpt={:#x} ipa={:#x} ipb={:#x} psw_addr={:#x} psw_mask={:#x}",
+                            sic.icptcode, sic.ipa, sic.ipb, run.psw_addr, run.psw_mask
+                        );
+                        // Dump raw `kvm_s390_sieic` bytes so we can decode additional fields
+                        // (program interruption code, etc.) without relying on bindgen names.
+                        let raw: &[u8] = unsafe {
+                            core::slice::from_raw_parts(
+                                core::ptr::addr_of!(sic).cast::<u8>(),
+                                mem::size_of_val(&sic),
+                            )
+                        };
+                        eprint!("s390x_kvm_run_debug sieic_raw[{}]:", raw.len());
+                        for b in raw {
+                            eprint!(" {b:02x}");
+                        }
+                        eprintln!();
+                    }
                     match gpr_file_for_s390_sie_decode(&mut vcpu) {
                         Ok(gprs) => {
                             if sic.icptcode == ICPT_WAIT {
-                                // Disabled wait (or other wait paths deferred to userspace): no further
-                                // guest progress without device/timer emulation — treat like `Hlt` for the
-                                // minimal Hyperlight bring-up guest.
-                                RunExit::Halt
+                                    if debug {
+                                        eprintln!(
+                                            "s390x_kvm_run_debug ICPT_WAIT gprs: r2={:#x} r3={:#x} r4={:#x} r5={:#x} r12={:#x} r14={:#x} r15={:#x}",
+                                            gprs[2], gprs[3], gprs[4], gprs[5], gprs[12], gprs[14], gprs[15]
+                                        );
+                                    }
+                                // If we land in disabled wait with IA=0, we most likely loaded the lowcore
+                                // `program_new_psw` (set up by Hyperlight to be WAIT@0). That should never
+                                // be treated as a successful halt: it means the guest never reached our
+                                // intended entrypoint / dispatch (and scratch cursors remain at 8).
+                                //
+                                // Recover by restoring the intended PSW (addr+mask) and retrying KVM_RUN.
+                                let run = vcpu.get_kvm_run();
+                                if run.psw_addr == 0 {
+                                    icpt_wait_retries += 1;
+                                    if icpt_wait_retries > MAX_ICPT_WAIT_RETRIES {
+                                        RunExit::Unknown(format!(
+                                            "s390x_icpt_wait_lowcore: psw_addr=0 psw_mask={:#x} ipa={:#x} ipb={:#x}",
+                                            run.psw_mask, sic.ipa, sic.ipb
+                                        ))
+                                    } else {
+                                        run.psw_addr = desired_addr;
+                                        run.psw_mask = desired_mask;
+                                        let mut g = self.shadow_psw.lock().unwrap();
+                                        g.0 = desired_addr;
+                                        g.1 = desired_mask;
+                                        continue;
+                                    }
+                                } else {
+                                    // WAIT somewhere other than 0: treat as halt-like for now.
+                                    RunExit::Halt
+                                }
                             } else if let Some((port, data)) = decode_s390_hyperlight_diag_io(
                                 sic.icptcode,
                                 sic.ipa,
                                 sic.ipb,
                                 &gprs,
                             ) {
+                                if debug {
+                                    // DebugPrint is extremely chatty (one DIAG per character) and will
+                                    // drown out the first non-print intercept that explains bring-up
+                                    // failures. Keep it quiet unless explicitly requested.
+                                    let data_u32 = u32::from_le_bytes([
+                                        data.get(0).copied().unwrap_or(0),
+                                        data.get(1).copied().unwrap_or(0),
+                                        data.get(2).copied().unwrap_or(0),
+                                        data.get(3).copied().unwrap_or(0),
+                                    ]);
+                                    let is_debug_print = port == hyperlight_common::outb::OutBAction::DebugPrint as u16;
+                                    if !is_debug_print
+                                        || std::env::var_os("HYPERLIGHT_S390X_KVM_RUN_DEBUG_PRINTS")
+                                            .is_some()
+                                    {
+                                        eprintln!(
+                                            "s390x_kvm_run_debug diag_io: port={} data_u32_le={:#x}",
+                                            port, data_u32
+                                        );
+                                    }
+                                }
                                 RunExit::IoOutAdvancePsw(port, data)
                             } else {
                                 RunExit::Unknown(format!(
@@ -351,25 +448,39 @@ impl KvmVm {
                 Ok(other) => RunExit::Unknown(format!("Unknown KVM VCPU exit: {:?}", other)),
                 Err(e) => RunExit::KernelErr(e),
             };
-            {
                 let run = vcpu.get_kvm_run();
-                let mut g = self.shadow_psw.lock().unwrap();
-                g.0 = run.psw_addr;
-                g.1 = psw_mask_hyperlight(run.psw_mask);
+                let psw_addr = run.psw_addr;
+                let psw_mask = run.psw_mask;
+                break (ia_at_kvm_run_entry, m, psw_addr, psw_mask);
             }
-            (ia_at_kvm_run_entry, m)
         };
+
+        // Update shadow PSW after `KVM_RUN` with exit context.
+        {
+            let mut g = self.shadow_psw.lock().unwrap();
+            match &mapped {
+                RunExit::IoOutAdvancePsw(_, _) => {
+                    // On current Linux KVM s390x, `kvm_run.psw_addr` already points at the
+                    // instruction *after* the intercepted `DIAG`, so do not advance here.
+                    g.0 = exit_psw_addr;
+                }
+                _ => {
+                    g.0 = exit_psw_addr;
+                }
+            }
+            g.1 = psw_mask_hyperlight(exit_psw_mask);
+            if debug {
+                eprintln!(
+                    "s390x_kvm_run_debug shadow_psw <- psw_addr={:#x} psw_mask={:#x}",
+                    g.0, g.1
+                );
+            }
+        }
 
         match mapped {
             RunExit::Halt => Ok(VmExit::Halt()),
             RunExit::IoOut(port, data) => Ok(VmExit::IoOut(port, data)),
             RunExit::IoOutAdvancePsw(port, data) => {
-                let mut g = self.shadow_psw.lock().unwrap();
-                let ia_after = g.0;
-                if ia_after == ia_at_kvm_run_entry {
-                    g.0 = ia_after.wrapping_add(S390_DIAG_INSN_LEN);
-                }
-                drop(g);
                 // Match `kvm/x86_64.rs`: port 108 is `VmAction::Halt`, not `OutBAction` (see `outb.rs`).
                 if port == VmAction::Halt as u16 {
                     Ok(VmExit::Halt())

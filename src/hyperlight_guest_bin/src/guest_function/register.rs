@@ -14,8 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
+#[cfg(not(target_arch = "s390x"))]
 use alloc::collections::BTreeMap;
 use alloc::string::String;
+#[cfg(target_arch = "s390x")]
+use alloc::vec::Vec;
 
 use hyperlight_common::func::{ParameterTuple, SupportedReturnType};
 
@@ -27,13 +30,23 @@ use crate::guest_function::definition::AsGuestFunctionDefinition;
 #[derive(Debug, Clone)]
 pub struct GuestFunctionRegister<F: Copy> {
     /// Currently registered guest functions
+    #[cfg(not(target_arch = "s390x"))]
     guest_functions: BTreeMap<String, GuestFunctionDefinition<F>>,
+    /// Linux s390x KVM bring-up: `buddy_system_allocator::LockedHeap` uses a non-reentrant
+    /// `spin::Mutex`. `BTreeMap::insert` can perform multiple internal allocations per insert;
+    /// combined with the global logger / `String` growth paths this has been observed to wedge
+    /// the guest during `GUEST_FUNCTION_INIT`. A flat `Vec` keeps registration to simple pushes.
+    #[cfg(target_arch = "s390x")]
+    guest_functions: Vec<(String, GuestFunctionDefinition<F>)>,
 }
 
 impl<F: Copy> Default for GuestFunctionRegister<F> {
     fn default() -> Self {
         Self {
+            #[cfg(not(target_arch = "s390x"))]
             guest_functions: BTreeMap::new(),
+            #[cfg(target_arch = "s390x")]
+            guest_functions: Vec::new(),
         }
     }
 }
@@ -42,7 +55,10 @@ impl<F: Copy> GuestFunctionRegister<F> {
     /// Create a new `GuestFunctionRegister`.
     pub const fn new() -> Self {
         Self {
+            #[cfg(not(target_arch = "s390x"))]
             guest_functions: BTreeMap::new(),
+            #[cfg(target_arch = "s390x")]
+            guest_functions: Vec::new(),
         }
     }
 
@@ -54,13 +70,37 @@ impl<F: Copy> GuestFunctionRegister<F> {
         &mut self,
         guest_function: GuestFunctionDefinition<F>,
     ) -> Option<GuestFunctionDefinition<F>> {
-        self.guest_functions
-            .insert(guest_function.function_name.clone(), guest_function)
+        #[cfg(not(target_arch = "s390x"))]
+        {
+            self.guest_functions
+                .insert(guest_function.function_name.clone(), guest_function)
+        }
+        #[cfg(target_arch = "s390x")]
+        {
+            let name = guest_function.function_name.clone();
+            for (n, def) in self.guest_functions.iter_mut() {
+                if *n == name {
+                    return Some(core::mem::replace(def, guest_function));
+                }
+            }
+            self.guest_functions.push((name, guest_function));
+            None
+        }
     }
 
     /// Gets a `GuestFunctionDefinition` by its `name` field.
     pub fn get(&self, function_name: &str) -> Option<&GuestFunctionDefinition<F>> {
-        self.guest_functions.get(function_name)
+        #[cfg(not(target_arch = "s390x"))]
+        {
+            self.guest_functions.get(function_name)
+        }
+        #[cfg(target_arch = "s390x")]
+        {
+            self.guest_functions
+                .iter()
+                .find(|(n, _)| n == function_name)
+                .map(|(_, g)| g)
+        }
     }
 }
 

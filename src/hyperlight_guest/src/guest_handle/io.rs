@@ -46,8 +46,7 @@ impl GuestHandle {
         }
 
         // get relative offset to next free address
-        let stack_ptr_rel: u64 =
-            u64::from_le_bytes(idb[..8].try_into().expect("Shared input buffer too small"));
+        let stack_ptr_rel = u64::from_le_bytes(idb[0..8].try_into().unwrap());
 
         if stack_ptr_rel as usize > input_stack_size || stack_ptr_rel < 16 {
             return Err(HyperlightGuestError::new(
@@ -63,7 +62,7 @@ impl GuestHandle {
         let last_element_offset_rel = u64::from_le_bytes(
             idb[stack_ptr_rel as usize - 8..stack_ptr_rel as usize]
                 .try_into()
-                .expect("Invalid stack pointer in pop_shared_input_data_into"),
+                .unwrap(),
         );
 
         let buffer = &idb[last_element_offset_rel as usize..];
@@ -80,7 +79,7 @@ impl GuestHandle {
         };
 
         // update the stack pointer to point to the element we just popped of since that is now free
-        idb[..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
+        idb[0..8].copy_from_slice(&last_element_offset_rel.to_le_bytes());
 
         // zero out popped off buffer
         idb[last_element_offset_rel as usize..stack_ptr_rel as usize].fill(0);
@@ -104,8 +103,7 @@ impl GuestHandle {
         }
 
         // get offset to next free address on the stack
-        let stack_ptr_rel: u64 =
-            u64::from_le_bytes(odb[..8].try_into().expect("Shared output buffer too small"));
+        let stack_ptr_rel = u64::from_le_bytes(odb[0..8].try_into().unwrap());
 
         // check if the stack pointer is within the bounds of the buffer.
         // It can be equal to the size, but never greater
@@ -137,13 +135,12 @@ impl GuestHandle {
         odb[stack_ptr_rel as usize..stack_ptr_rel as usize + data.len()].copy_from_slice(data);
 
         // write the offset to the newly written data, to the top of the stack
-        let bytes: [u8; 8] = stack_ptr_rel.to_le_bytes();
         odb[stack_ptr_rel as usize + data.len()..stack_ptr_rel as usize + data.len() + 8]
-            .copy_from_slice(&bytes);
+            .copy_from_slice(&stack_ptr_rel.to_le_bytes());
 
         // update stack pointer to point to next free address
         let new_stack_ptr_rel: u64 = (stack_ptr_rel as usize + data.len() + 8) as u64;
-        odb[0..8].copy_from_slice(&(new_stack_ptr_rel).to_le_bytes());
+        odb[0..8].copy_from_slice(&new_stack_ptr_rel.to_le_bytes());
 
         Ok(())
     }

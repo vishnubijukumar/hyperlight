@@ -230,6 +230,47 @@ pub(crate) extern "C" fn generic_init(
         #[allow(static_mut_refs)]
         let peb_ptr = GUEST_HANDLE.peb().unwrap();
 
+        // s390x bring-up: if PEB I/O pointers look invalid, print what the guest sees.
+        // Use DebugPrint (DIAG out32) so this works even if scratch is wrong.
+        #[cfg(target_arch = "s390x")]
+        {
+            #[inline]
+            fn dbg_bytes(b: &[u8]) {
+                let s = unsafe { core::str::from_utf8_unchecked(b) };
+                hyperlight_guest::exit::debug_print(s);
+            }
+            #[inline]
+            fn dbg_hex(label: &[u8], v: u64) {
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                let mut buf = [0u8; 18];
+                buf[0] = b'0';
+                buf[1] = b'x';
+                for i in 0..16 {
+                    let shift = 60usize.saturating_sub(i * 4);
+                    let nib = ((v >> shift) & 0xf) as usize;
+                    buf[2 + i] = HEX[nib];
+                }
+                dbg_bytes(label);
+                dbg_bytes(&buf);
+                dbg_bytes(b"\n");
+            }
+            let (in_sz, in_ptr, out_sz, out_ptr) = unsafe {
+                (
+                    (*peb_ptr).input_stack.size,
+                    (*peb_ptr).input_stack.ptr,
+                    (*peb_ptr).output_stack.size,
+                    (*peb_ptr).output_stack.ptr,
+                )
+            };
+            if in_ptr == 0 || out_ptr == 0 || in_sz == 0 || out_sz == 0 {
+                dbg_hex(b"s390x_guest generic_init peb_ptr=", peb_ptr as usize as u64);
+                dbg_hex(b"s390x_guest PEB in.size=", in_sz);
+                dbg_hex(b"s390x_guest PEB in.ptr=", in_ptr);
+                dbg_hex(b"s390x_guest PEB out.size=", out_sz);
+                dbg_hex(b"s390x_guest PEB out.ptr=", out_ptr);
+            }
+        }
+
         let heap_start = (*peb_ptr).guest_heap.ptr as usize;
         let heap_size = (*peb_ptr).guest_heap.size as usize;
         #[cfg(not(all(feature = "mem_profile", target_arch = "x86_64")))]
@@ -255,9 +296,20 @@ pub(crate) extern "C" fn generic_init(
         OS_PAGE_SIZE = ops as u32;
     }
 
-    // set up the logger
     let guest_log_level_filter =
         GuestLogFilter::try_from(max_log_level).expect("Invalid log level");
+
+    // Register guest functions before installing the global `log` logger. On Linux KVM s390x,
+    // `register_fn` performs several heap allocations (`String`, `BTreeMap`); if the logger is
+    // already active, `log` / tracing integration can allocate again while the buddy-system
+    // `LockedHeap` mutex is held (non-reentrant), which wedges the guest in a spin during init.
+    #[cfg(feature = "macros")]
+    {
+        for registration in __private::GUEST_FUNCTION_INIT.iter() {
+            registration();
+        }
+    }
+
     init_logger(guest_log_level_filter.into());
 
     // It is important that all the tracing events are produced after the tracing is initialized.
@@ -274,11 +326,6 @@ pub(crate) extern "C" fn generic_init(
     // well-known state
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
     let _entered = tracing::span!(tracing::Level::INFO, "generic_init").entered();
-
-    #[cfg(feature = "macros")]
-    for registration in __private::GUEST_FUNCTION_INIT {
-        registration();
-    }
 
     unsafe {
         hyperlight_main();

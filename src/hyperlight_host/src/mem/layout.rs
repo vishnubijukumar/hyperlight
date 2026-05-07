@@ -617,9 +617,10 @@ impl SandboxMemoryLayout {
     /// Refresh PEB `input_stack.ptr` / `output_stack.ptr` for s390x so they use
     /// `scratch_base_gpa(live_scratch_size)` (same base as the KVM scratch slot).
     ///
-    /// `write_u64` writes a native-endian `u64` into the **snapshot** image at a byte offset.
-    /// With default `SnapshotSharedMemory` this is [`ReadonlySharedMemory::host_write_native_u64_at`];
-    /// with `unshared_snapshot_mem`, the snapshot side is [`HostSharedMemory::write`].
+    /// The `write_u64` callback writes a native-endian `u64` into the **snapshot** image at a byte
+    /// offset. On Linux s390x this must be [`crate::mem::shared_mem::HostSharedMemory::write_native_u64_volatile_at`]
+    /// (`build.rs` enables `unshared_snapshot_mem` there so the snapshot side is writable
+    /// [`HostSharedMemory`], not [`crate::mem::shared_mem::ReadonlySharedMemory`]).
     #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
     pub(crate) fn sync_s390_peb_io_scratch_pointers(
         &self,

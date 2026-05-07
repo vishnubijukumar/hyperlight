@@ -757,6 +757,16 @@ impl HyperlightVm {
                     break Err(RunVmError::ExecutionCancelledByHost);
                 }
                 Ok(VmExit::Unknown(reason)) => {
+                    #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+                    {
+                        if reason.starts_with("s390x_icpt_wait_lowcore")
+                            && std::env::var_os("HYPERLIGHT_S390X_LOWCORE_DUMP")
+                                .as_deref()
+                                .is_some_and(|v| !v.is_empty())
+                        {
+                            self.dump_s390x_lowcore();
+                        }
+                    }
                     break Err(RunVmError::UnexpectedVmExit(reason));
                 }
                 Ok(VmExit::Retry()) => continue,

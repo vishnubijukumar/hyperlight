@@ -375,14 +375,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
     pub(crate) fn sync_s390_peb_io_scratch_pointers_from_live_scratch(&self) -> Result<()> {
         let live = self.scratch_mem.mem_size();
         self.layout.sync_s390_peb_io_scratch_pointers(live, |off, v| {
-            #[cfg(unshared_snapshot_mem)]
-            {
-                self.shared_mem.write(off, v)
-            }
-            #[cfg(not(unshared_snapshot_mem))]
-            {
-                self.shared_mem.host_write_native_u64_at(off, v)
-            }
+            self.shared_mem.write_native_u64_volatile_at(off, v)
         })
     }
 
@@ -469,7 +462,10 @@ impl SandboxMemoryManager<HostSharedMemory> {
             self.layout.get_input_data_buffer_scratch_host_offset(),
             self.layout.sandbox_memory_config.get_input_data_size(),
             data,
-        )
+        )?;
+        #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
+        Ok(())
     }
 
     /// Writes a guest function call to memory
@@ -487,6 +483,8 @@ impl SandboxMemoryManager<HostSharedMemory> {
             self.layout.sandbox_memory_config.get_input_data_size(),
             buffer,
         )?;
+        #[cfg(all(target_os = "linux", target_arch = "s390x", not(feature = "nanvix-unstable")))]
+        std::sync::atomic::fence(std::sync::atomic::Ordering::SeqCst);
         Ok(())
     }
 
@@ -734,14 +732,7 @@ impl SandboxMemoryManager<HostSharedMemory> {
         #[cfg(all(target_arch = "s390x", not(feature = "nanvix-unstable")))]
         self.layout
             .sync_s390_peb_io_scratch_pointers(scratch_size, |off, v| {
-                #[cfg(unshared_snapshot_mem)]
-                {
-                    self.shared_mem.write(off, v)
-                }
-                #[cfg(not(unshared_snapshot_mem))]
-                {
-                    self.shared_mem.host_write_native_u64_at(off, v)
-                }
+                self.shared_mem.write_native_u64_volatile_at(off, v)
             })?;
 
         // Copy the page tables into the scratch region. Use the logical snapshot image length
