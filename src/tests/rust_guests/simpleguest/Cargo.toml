@@ -16,9 +16,3 @@ default = []
 trace_guest = ["hyperlight-guest-bin/trace_guest", "hyperlight-guest/trace_guest", "hyperlight-guest-tracing/trace"]
 mem_profile = ["hyperlight-common/mem_profile", "hyperlight-guest-bin/mem_profile"]
 
-[profile.dev]
-panic = "abort"
-
-[profile.release]
-panic = "abort"
-

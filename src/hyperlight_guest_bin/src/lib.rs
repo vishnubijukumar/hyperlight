@@ -299,14 +299,18 @@ pub(crate) extern "C" fn generic_init(
     let guest_log_level_filter =
         GuestLogFilter::try_from(max_log_level).expect("Invalid log level");
 
-    // Register guest functions before installing the global `log` logger. On Linux KVM s390x,
-    // `register_fn` performs several heap allocations (`String`, `BTreeMap`); if the logger is
-    // already active, `log` / tracing integration can allocate again while the buddy-system
-    // `LockedHeap` mutex is held (non-reentrant), which wedges the guest in a spin during init.
-    #[cfg(feature = "macros")]
+    // s390x: register guest functions *before* the logger to avoid a deadlock in the
+    // non-reentrant `buddy_system_allocator::LockedHeap`. `BTreeMap::insert` / `String`
+    // growth can re-enter the allocator from a `log` hook if the logger is already active.
+    // On x86 the musl allocator is reentrant, so we keep the original order (logger first)
+    // to preserve `trace_guest` span coverage of the registration phase.
+    #[cfg(target_arch = "s390x")]
     {
-        for registration in __private::GUEST_FUNCTION_INIT.iter() {
-            registration();
+        #[cfg(feature = "macros")]
+        {
+            for registration in __private::GUEST_FUNCTION_INIT.iter() {
+                registration();
+            }
         }
     }
 
@@ -326,6 +330,18 @@ pub(crate) extern "C" fn generic_init(
     // well-known state
     #[cfg(all(feature = "trace_guest", target_arch = "x86_64"))]
     let _entered = tracing::span!(tracing::Level::INFO, "generic_init").entered();
+
+    // x86 / non-s390x: register guest functions after the logger + tracing are set up so
+    // the `generic_init` trace span captures registration activity.
+    #[cfg(not(target_arch = "s390x"))]
+    {
+        #[cfg(feature = "macros")]
+        {
+            for registration in __private::GUEST_FUNCTION_INIT.iter() {
+                registration();
+            }
+        }
+    }
 
     unsafe {
         hyperlight_main();
