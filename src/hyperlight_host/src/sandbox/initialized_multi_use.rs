@@ -1110,6 +1110,10 @@ mod tests {
     // Tests to ensure that many (1000) function calls can be made in a call context with a small stack (24K) and heap(20K).
     // This test effectively ensures that the stack is being properly reset after each call and we are not leaking memory in the Guest.
     #[test]
+    #[cfg_attr(
+        target_arch = "s390x",
+        ignore = "s390x guest statically links libc, needs more heap than 20KB"
+    )]
     fn test_with_small_stack_and_heap() {
         let mut cfg = SandboxConfiguration::default();
         cfg.set_heap_size(20 * 1024);
@@ -1175,6 +1179,10 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(
+        target_arch = "s390x",
+        ignore = "x86 ud2/IDT exception handling; s390x uses program interrupts"
+    )]
     fn test_trigger_exception_on_guest() {
         let usbox = UninitializedSandbox::new(
             GuestBinary::FilePath(simple_guest_as_string().expect("Guest Binary Missing")),
@@ -1455,6 +1463,10 @@ mod tests {
     /// Test that snapshot restore properly resets vCPU debug registers. This test verifies
     /// that restore() calls reset_vcpu().
     #[test]
+    #[cfg_attr(
+        target_arch = "s390x",
+        ignore = "x86 DR0-DR7 debug registers; s390x has no equivalent"
+    )]
     fn snapshot_restore_resets_debug_registers() {
         let mut sandbox: MultiUseSandbox = {
             let path = simple_guest_as_string().unwrap();
