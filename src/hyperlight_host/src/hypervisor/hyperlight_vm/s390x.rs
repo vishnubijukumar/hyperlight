@@ -277,8 +277,15 @@ impl HyperlightVm {
 
             let (_h, low_guest) = low_eshm.build();
             let low_rgn = low_guest.mapping_at(0, MemoryRegionType::S390xLowcore);
+            // Map lowcore directly via the VM fd without adding it to `mmap_regions`.
+            // `mmap_regions` is subject to snapshot region diffs during `restore()` and
+            // lowcore would be unmapped because it's not in the snapshot's region list.
+            let low_slot = ret.next_slot;
+            ret.next_slot += 1;
             unsafe {
-                ret.map_region(&low_rgn)?;
+                ret.vm
+                    .map_memory((low_slot, &low_rgn))
+                    .map_err(|e| CreateHyperlightVmError::SharedMemorySetup(format!("lowcore map: {e:#}")))?;
             }
             ret.s390x_lowcore_guest_mem = Some(low_guest);
         }

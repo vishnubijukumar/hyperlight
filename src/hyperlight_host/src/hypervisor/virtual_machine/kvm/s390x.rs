@@ -324,6 +324,11 @@ impl KvmVm {
                     let run = vcpu.get_kvm_run();
                     run.psw_addr = desired_addr;
                     run.psw_mask = desired_mask;
+                    // Hyperlight programs GPRs via KVM_SET_REGS; clear the sync-register
+                    // flags so the kernel doesn't override them with stale kvm_run.s.regs
+                    // values (which can cause EINVAL after a snapshot restore).
+                    run.kvm_valid_regs = 0;
+                    run.kvm_dirty_regs = 0;
                     if debug {
                         eprintln!(
                             "s390x_kvm_run_debug entry: psw_addr={:#x} psw_mask={:#x} (retry_icpt_wait={icpt_wait_retries})",
